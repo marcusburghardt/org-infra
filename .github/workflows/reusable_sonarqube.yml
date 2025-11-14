@@ -1,0 +1,79 @@
+name: Reusable SonarCloud Analysis
+
+# --------------------------------------------------------------------------
+# This workflow only runs when explicitly called by another workflow.
+# --------------------------------------------------------------------------
+on:
+  workflow_call:
+    inputs:
+      sonar_organization:
+        required: true
+        type: string
+        description: 'The SonarCloud organization key (e.g., rh-psce).'
+      sonar_project_key:
+        required: true    # Make this mandatory for clarity
+        type: string
+        description: 'The SonarCloud project key (e.g., rh-psce_complyctl).'
+      coverage_artifact_name:
+        required: false   # Optional, as some repos might not have coverage
+        type: string
+        default: coverage
+        description: 'The name of the coverage artifact that was uploaded by the caller (e.g., coverage).'
+      coverage_file_path:
+        required: false   # Optional, as some repos might not have coverage
+        type: string
+        description: 'The path to the generated coverage file (e.g., coverage.out).'
+      language_scanner_property:
+        required: false
+        type: string
+        description: 'The Sonar Scanner property for coverage, e.g., sonar.typescript.lcov.reportPaths.'
+    secrets:
+      SONAR_TOKEN:
+        required: true
+        description: 'The SonarCloud analysis token.'
+
+permissions:
+  contents: read
+  issues: none
+  pull-requests: none
+
+jobs:
+  sonar_analysis:
+    name: Analyze with SonarCloud
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: "${{ github.event.repository.full_name }}"
+          fetch-depth: 0 # This may also capture vulnerabilities unrelated to the PR.
+
+      - name: Download coverage file
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        if: ${{ inputs.coverage_file_path != '' }}
+        env:
+          COVERAGE_ARTIFACT_NAME: "${{ inputs.coverage_artifact_name }}"
+          COVERAGE_FILE_PATH: "${{ inputs.coverage_file_path }}"
+        with:
+          name: ${{ env.COVERAGE_ARTIFACT_NAME }}
+          path: ${{ env.COVERAGE_FILE_PATH }}
+
+      # The calling workflow MUST ensure the coverage file exists before calling this.
+      # This step just runs the SonarCloud analysis with the provided inputs.
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: ${{ github.workspace }} # Ensure scan starts at the repo root
+          args: >
+            "-Dsonar.organization=${{ inputs.sonar_organization }}"
+            "-Dsonar.projectKey=${{ inputs.sonar_project_key }}"
+            "-Dsonar.qualitygate.wait=true"
+            # Inject dynamic coverage properties only if path is provided
+            "${{ inputs.coverage_file_path && format('-D{0}={1}', inputs.language_scanner_property, inputs.coverage_file_path) || '' }}"
