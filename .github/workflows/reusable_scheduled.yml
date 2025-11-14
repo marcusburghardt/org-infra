@@ -21,7 +21,7 @@ permissions:
   security-events: none
 
 jobs:
-  vuln_scan:
+  call_ext_osv_scanner:
     name: OSV-Scanner
     # https://google.github.io/osv-scanner/github-action/
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9bb69575e74019c2ad085a1860787043adf47ccb # v2.2.4
@@ -34,7 +34,7 @@ jobs:
       fail-on-vuln: true
       upload-sarif: true
 
-  scorecard:
+  call_reusable_security:
     name: OpenSSF Scorecards
     permissions:
       contents: read

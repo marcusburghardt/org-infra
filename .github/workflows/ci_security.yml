@@ -15,7 +15,7 @@ permissions:
   security-events: none
 
 jobs:
-  vuln_scan:
+  call_reusable_vuln_scan:
     name: OSV-Scanner
     permissions:
       contents: read
@@ -23,7 +23,7 @@ jobs:
       security-events: write  # Needed to upload the results to code-scanning dashboard.
     uses: complytime/org-infra/.github/workflows/reusable_vuln_scan.yml@main
 
-  scorecard:
+  call_reusable_security:
     name: OpenSSF Scorecards
     permissions:
       contents: read
