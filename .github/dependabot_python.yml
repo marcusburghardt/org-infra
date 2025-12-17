@@ -15,12 +15,8 @@ updates:
       prefix: "ci"
       include: "scope"
 
-  - package-ecosystem: "gomod"
-    directories:
-      - "/"
-      - "/compass"      # used in complybeacon
-      - "/proofwatch"   # used in complybeacon
-      - "/truthbeam"    # used in complybeacon
+  - package-ecosystem: "pip"
+    directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
