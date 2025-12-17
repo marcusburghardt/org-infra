@@ -6,9 +6,14 @@
 # Repositories to exclude from synchronization
 # org-infra is excluded by default as it's the source repository
 exclude_repos:
-  - .github       # Organization config repository
-  - org-infra     # This repository itself
-  - oscal-content # Empty repository
+  - cac-content                 # Forked repository for testing transformation from CaC to OSCAL
+  - compliance-to-policy-go     # Forked repository for testing features
+  - compliance-to-policy-python # Forked repository for testing features
+  - complytime-collector-distro # Empty repository
+  - creme-brulee                # Template repository for training purposes
+  - org-infra                   # This repository itself
+  - oscal-content               # Empty repository
+  - oscal-sdk-go                # Forked repository for testing features
 
 # Files and workflows to synchronize
 # Each entry specifies:
@@ -32,6 +37,22 @@ files_to_sync:
   # Configuration Files
   - source: .github/dependabot.yml
     destination: .github/dependabot.yml
+    exclude_repos:
+      - complyscribe
+      - complytime-demos
+      - complytime-policies
+      - vagrant-boxes
+
+  - source: .github/dependabot_python.yml
+    destination: .github/dependabot.yml
+    exclude_repos:
+      - .github
+      - compliance-to-policy-plugins
+      - complybeacon
+      - complyctl
+      - complytime-collector-components
+      - gemara2oscal
+      - vagrant-boxes
 
   - source: .mega-linter.yml
     destination: .mega-linter.yml
@@ -47,14 +68,17 @@ files_to_sync:
     exclude_repos:
       - complyscribe
       - complytime-demos
+      - complytime-policies
       - vagrant-boxes
 
   - source: ruff.toml
     destination: ruff.toml
     exclude_repos:
+      - .github
       - compliance-to-policy-plugins
       - complybeacon
       - complyctl
+      - complytime-collector-components
       - gemara2oscal
       - vagrant-boxes
 
