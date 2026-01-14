@@ -509,6 +509,7 @@ def main():
         print("DRY RUN MODE - No changes will be made")
         print("="*60)
 
+    print(f"{len(excluded_repos)} repositories were excluded in this sync:\n- {'\n- '.join(excluded_repos)}")
     print(f"\nWill process {len(repositories)} repository(ies)")
 
     success_count = 0
