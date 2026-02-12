@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   actions: none
+  attestations: none
   id-token: none
   security-events: none
 
@@ -19,3 +20,17 @@ jobs:
       security-events: write  # Require writing security events to upload SARIF file to security tab
       id-token: write         # Needed to access GitHub's OIDC token which verifies the authenticity of the result when publishing it.
     uses: complytime/org-infra/.github/workflows/reusable_scheduled.yml@main
+
+  call_reusable_compliance:
+    name: Compliance Evaluation
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    uses: complytime/org-infra/.github/workflows/reusable_compliance.yml@main
+    with:
+      policy_url: https://github.com/complytime/org-infra#compliance/ampel/branch-protection-rules.json
+      push_attestation: true
+    secrets:
+      source_token: ${{ secrets.GITHUB_TOKEN }}
