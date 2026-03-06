@@ -47,9 +47,9 @@ files_to_sync:
     exclude_repos:
       - .github
       - compliance-to-policy-plugins
-      - complybeacon
       - complyctl
       - complytime-collector-components
+      - gemara-content-service
       - gemara2oscal
       - vagrant-boxes
 
@@ -77,9 +77,9 @@ files_to_sync:
     exclude_repos:
       - .github
       - compliance-to-policy-plugins
-      - complybeacon
       - complyctl
       - complytime-collector-components
+      - gemara-content-service
       - gemara2oscal
       - vagrant-boxes
 
