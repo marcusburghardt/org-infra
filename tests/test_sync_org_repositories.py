@@ -15,8 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 sync_module = importlib.import_module("sync-org-repositories")
 
-import pytest
-
 GITHUB_API = sync_module.GITHUB_API
 
 # Valid 40-character hex SHA for use in transform_workflow_refs tests.

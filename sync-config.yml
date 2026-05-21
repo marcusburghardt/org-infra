@@ -10,6 +10,8 @@ exclude_repos:
   - website                     # Managed independently
   - nunya                       # Internal tooling (Jira migration)
   - roadmap                     # Internal tooling (roadmap scripts)
+  - complyscribe                # Archived
+  - gemara-content-service      # Archived
 
 # Files and workflows to synchronize
 # Each entry specifies:
@@ -20,15 +22,23 @@ files_to_sync:
   # GitHub Workflows
   - source: .github/workflows/ci_checks.yml
     destination: .github/workflows/ci_checks.yml
+    exclude_repos:
+      - community
 
   - source: .github/workflows/ci_dependencies.yml
     destination: .github/workflows/ci_dependencies.yml
+    exclude_repos:
+      - community
 
   - source: .github/workflows/ci_scheduled.yml
     destination: .github/workflows/ci_scheduled.yml
+    exclude_repos:
+      - community
 
   - source: .github/workflows/ci_security.yml
     destination: .github/workflows/ci_security.yml
+    exclude_repos:
+      - community
     vars:
       enable_trivy_source:
         default: "false"
@@ -37,13 +47,11 @@ files_to_sync:
           complytime: "true"
           complytime-providers: "true"
           complytime-collector-components: "true"
-          gemara-content-service: "true"
-          complyscribe: "true"
 
   - source: .github/workflows/ci_crapload.yml
     destination: .github/workflows/ci_crapload.yml
     exclude_repos:
-      - complyscribe
+      - .github
       - complytime-demos
       - complytime-policies
       - community
@@ -56,8 +64,6 @@ files_to_sync:
 
   - source: .yamllint.yml
     destination: .yamllint.yml
-    exclude_repos:
-      - complyscribe
 
   - source: commitlint.config.js
     destination: commitlint.config.js
@@ -65,9 +71,9 @@ files_to_sync:
   - source: .golangci.yml
     destination: .golangci.yml
     exclude_repos:
-      - complyscribe
       - complytime-demos
       - complytime-policies
+      - community
 
   - source: ruff.toml
     destination: ruff.toml
@@ -77,32 +83,31 @@ files_to_sync:
       - complytime
       - complytime-collector-components
       - complytime-providers
-      - gemara-content-service
+      - community
 
   # AI Tooling
   - source: .specify/memory/constitution.md
     destination: .specify/memory/constitution.md
     exclude_repos:
       - .github
-      - complyscribe
 
   - source: docs/AI_TOOLING.md
     destination: docs/AI_TOOLING.md
     exclude_repos:
       - .github
-      - complyscribe
+      - community
 
   - source: .agents/skills/.gitkeep
     destination: .agents/skills/.gitkeep
     exclude_repos:
       - .github
-      - complyscribe
+      - community
 
   - source: .opencode/commands/review-pr.md
     destination: .opencode/commands/review-pr.md
     exclude_repos:
       - .github
-      - complyscribe
+      - community
 
   # GitHub Templates
   - source: .github/pull_request_template.md
@@ -181,37 +186,6 @@ dependabot:
 
     complytime-providers:
       - package-ecosystem: "gomod"
-        directory: "/"
-        schedule:
-          interval: "weekly"
-        open-pull-requests-limit: 10
-        commit-message:
-          prefix: "chore"
-          include: "scope"
-
-    gemara-content-service:
-      - package-ecosystem: "gomod"
-        directory: "/"
-        schedule:
-          interval: "weekly"
-        open-pull-requests-limit: 10
-        commit-message:
-          prefix: "chore"
-          include: "scope"
-
-    complyscribe:
-      - package-ecosystem: "github-actions"
-        directories:
-          - "/"
-          - "/.github/actions/e2e-testing"
-          - "/.github/actions/publish-image"
-          - "/.github/actions/setup-poetry"
-        schedule:
-          interval: "daily"
-        commit-message:
-          prefix: "ci"
-          include: "scope"
-      - package-ecosystem: "pip"
         directory: "/"
         schedule:
           interval: "weekly"
