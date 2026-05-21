@@ -19,7 +19,7 @@ permissions:
 jobs:
   crapload:
     name: CRAP Load Analysis
-    uses: complytime/org-infra/.github/workflows/reusable_crapload_analysis.yml@cfd981e757253218aefb37c91969c32827e5c4b1 # v0.2.1
+    uses: ./.github/workflows/reusable_crapload_analysis.yml
     permissions:
       contents: read
 

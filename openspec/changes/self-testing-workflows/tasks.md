@@ -6,7 +6,7 @@
 - [x] 1.4 Update `.github/workflows/ci_dependencies.yml`: replace both reusable workflow refs (`reusable_deps_reviewer.yml` and `reusable_dependabot_reviewer.yml`) with local paths
 - [x] 1.5 Update `.github/workflows/ci_scheduled.yml`: replace `complytime/org-infra/.github/workflows/reusable_scheduled.yml@cfd981e757253218aefb37c91969c32827e5c4b1 # v0.2.1` with `./.github/workflows/reusable_scheduled.yml`
 - [x] 1.6 Update `.github/workflows/ci_security.yml`: replace both reusable workflow refs (`reusable_vuln_scan.yml` and `reusable_security.yml`) with local paths
-- [x] 1.7 Update `.github/workflows/reusable_scheduled.yml`: replace the reusable-to-reusable ref to `reusable_security.yml` with a local path
+- [ ] ~~1.7 Update `.github/workflows/reusable_scheduled.yml`: replace the reusable-to-reusable ref to `reusable_security.yml` with a local path~~ — Reverted: reusable-to-reusable refs must stay SHA-pinned because reusable workflows run in the downstream repo context where local paths would not resolve
 
 ## 2. Sync Script — Release Detection
 

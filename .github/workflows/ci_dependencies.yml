@@ -25,11 +25,11 @@ env:
 jobs:
   call_deps_reviewer:
     name: General
-    uses: complytime/org-infra/.github/workflows/reusable_deps_reviewer.yml@cfd981e757253218aefb37c91969c32827e5c4b1 # v0.2.1
+    uses: ./.github/workflows/reusable_deps_reviewer.yml
 
   call_dependabot_reviewer:
     name: Dependabot
-    uses: complytime/org-infra/.github/workflows/reusable_dependabot_reviewer.yml@cfd981e757253218aefb37c91969c32827e5c4b1 # v0.2.1
+    uses: ./.github/workflows/reusable_dependabot_reviewer.yml
 
   comment_on_dependabot_prs:
     name: Dependabot Comment

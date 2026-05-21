@@ -72,6 +72,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", os.getenv("GITHUB_PAT"))
 DEFAULT_CONFIG_FILE = "sync-config.yml"
 SYNC_BRANCH_PREFIX = "sync-repo-standards-"
 SYNC_PR_TITLE = "chore: sync repository standards"
+SOURCE_REPO = "org-infra"
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +100,15 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         help="Specific repositories to sync (default: all from peribolos.yml)",
     )
+    parser.add_argument(
+        "--release-ref",
+        default=None,
+        help=(
+            "Release tag to use for workflow ref "
+            "transformation (e.g., v0.3.0). Auto-detects "
+            "latest release if not provided."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -123,6 +133,12 @@ def validate_github_api_request(endpoint: str, method: str) -> bool:
         (r"^" + re.escape(GITHUB_API) + r"/repos/[^/]+/[^/]+/pulls$", "GET"),
         (r"^" + re.escape(GITHUB_API) + r"/repos/[^/]+/[^/]+/pulls$", "POST"),
         (r"^" + re.escape(GITHUB_API) + r"/repos/[^/]+/[^/]+/contents/.+$", "GET"),
+        # Release detection
+        (r"^" + re.escape(GITHUB_API) + r"/repos/[^/]+/[^/]+/releases/latest$", "GET"),
+        # Tag-to-SHA resolution
+        (r"^" + re.escape(GITHUB_API) + r"/repos/[^/]+/[^/]+/git/ref/tags/.+$", "GET"),
+        # Annotated tag dereferencing
+        (r"^" + re.escape(GITHUB_API) + r"/repos/[^/]+/[^/]+/git/tags/[a-f0-9]+$", "GET"),
     ]
     return any(
         re.match(pattern, endpoint) and method == allowed_method
@@ -332,6 +348,115 @@ def apply_file_vars(content: str, resolved_vars: Dict[str, str]) -> str:
     return content
 
 
+def get_latest_release(
+    org: str, repo_name: str,
+) -> Tuple[str, str]:
+    """Fetch the latest release tag and resolve it to a commit SHA.
+
+    Queries the GitHub API for the latest published release, then
+    resolves the tag to a full commit SHA.  Handles both lightweight
+    tags (object.type == "commit") and annotated tags (object.type ==
+    "tag") by dereferencing the tag object when needed.
+
+    Args:
+        org: GitHub organization name.
+        repo_name: Repository name within the organization.
+
+    Returns:
+        Tuple of (tag_name, commit_sha).
+
+    Raises:
+        SystemExit: If no release is found or the tag cannot be
+            resolved.
+    """
+    release_url = (
+        f"{GITHUB_API}/repos/{org}/{repo_name}"
+        f"/releases/latest"
+    )
+    status, data = github_api_request(release_url)
+    if status != 200:
+        print(
+            f"No release found for {org}/{repo_name}. "
+            f"Use --release-ref <tag> to specify a "
+            f"release tag."
+        )
+        sys.exit(1)
+
+    tag_name = data["tag_name"]
+
+    ref_url = (
+        f"{GITHUB_API}/repos/{org}/{repo_name}"
+        f"/git/ref/tags/{tag_name}"
+    )
+    ref_status, ref_data = github_api_request(ref_url)
+    if ref_status != 200:
+        print(
+            f"Error: Could not resolve tag '{tag_name}' "
+            f"for {org}/{repo_name}."
+        )
+        sys.exit(1)
+
+    obj = ref_data.get("object", {})
+    if obj.get("type") == "tag":
+        # Annotated tag — dereference to get the commit SHA
+        tag_url = (
+            f"{GITHUB_API}/repos/{org}/{repo_name}"
+            f"/git/tags/{obj['sha']}"
+        )
+        _, tag_data = github_api_request(tag_url)
+        commit_sha = tag_data.get("object", {}).get("sha", "")
+    else:
+        # Lightweight tag — SHA points directly to the commit
+        commit_sha = obj.get("sha", "")
+
+    return tag_name, commit_sha
+
+
+def transform_workflow_refs(
+    content: str,
+    org: str,
+    source_repo: str,
+    sha: str,
+    tag: str,
+) -> str:
+    """Replace local workflow path refs with SHA-pinned cross-repo refs.
+
+    Finds ``uses: ./.github/workflows/reusable_<name>.yml`` patterns
+    and replaces them with
+    ``uses: <org>/<source_repo>/.github/workflows/reusable_<name>.yml@<sha>  # <tag>``.
+
+    Only matches lines where the value starts with
+    ``./.github/workflows/reusable_`` to avoid transforming
+    non-reusable workflow references.
+
+    Args:
+        content: Workflow file content as a string.
+        org: GitHub organization name (e.g., ``complytime``).
+        source_repo: Source repository name (e.g., ``org-infra``).
+        sha: Full 40-character commit SHA to pin to.
+        tag: Release tag for the inline version comment.
+
+    Returns:
+        Content with local refs replaced by SHA-pinned cross-repo
+        refs.
+
+    Raises:
+        ValueError: If ``sha`` is not a valid 40-character hex string.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError(f"Invalid SHA format: {sha!r}")
+
+    pattern = (
+        r"(uses:\s*)"
+        r"\./\.github/workflows/(reusable_\S+\.yml)"
+    )
+    replacement = (
+        rf"\g<1>{org}/{source_repo}/"
+        rf".github/workflows/\g<2>@{sha} # {tag}"
+    )
+    return re.sub(pattern, replacement, content)
+
+
 def setup_git_credentials(repo_path: str, org: str, repo_name: str) -> None:
     """Configure git credentials for authenticated pushes to the target repo.
 
@@ -526,6 +651,8 @@ def sync_repository(
     repo_name: str,
     config: dict,
     dry_run: bool = False,
+    release_tag: Optional[str] = None,
+    release_sha: Optional[str] = None,
 ) -> bool:
     """Sync a single repository with standard files using direct push.
 
@@ -534,6 +661,8 @@ def sync_repository(
         repo_name: Repository name
         config: Sync configuration
         dry_run: If True, only show what would be done
+        release_tag: Release tag for workflow ref transformation
+        release_sha: Commit SHA for workflow ref pinning
     """
     print(f"\n{'=' * 60}")
     print(f"Processing: {org}/{repo_name}")
@@ -611,19 +740,57 @@ def sync_repository(
                         print(f"{source_rel_path} excluded for this repo")
                         continue
 
-                resolved_vars = resolve_file_vars(file_config, repo_name)
+                resolved_vars = resolve_file_vars(
+                    file_config, repo_name,
+                )
 
-                if resolved_vars:
-                    # Var-aware path: read, substitute, compare resolved
-                    # content against destination.
-                    source_content = source_path.read_text()
-                    resolved_content = apply_file_vars(
-                        source_content, resolved_vars,
+                is_ci_workflow = (
+                    source_rel_path.startswith(
+                        ".github/workflows/ci_",
                     )
+                    and source_rel_path.endswith(".yml")
+                )
+                needs_content_transform = bool(
+                    resolved_vars,
+                ) or (
+                    is_ci_workflow
+                    and release_tag
+                    and release_sha
+                )
 
-                    if dry_run:
-                        for vn, vv in resolved_vars.items():
-                            print(f"[DRY RUN] var {vn}={vv}")
+                if needs_content_transform:
+                    # Content-transform path: read source,
+                    # apply vars and/or workflow ref
+                    # transformation, then compare.
+                    source_content = source_path.read_text()
+
+                    if resolved_vars:
+                        source_content = apply_file_vars(
+                            source_content, resolved_vars,
+                        )
+                        if dry_run:
+                            for vn, vv in resolved_vars.items():
+                                print(
+                                    f"[DRY RUN] var {vn}={vv}",
+                                )
+
+                    if is_ci_workflow and release_sha:
+                        source_content = (
+                            transform_workflow_refs(
+                                source_content,
+                                org,
+                                SOURCE_REPO,
+                                release_sha,
+                                release_tag or "",
+                            )
+                        )
+                        if dry_run:
+                            print(
+                                "[DRY RUN] workflow refs "
+                                "transformed"
+                            )
+
+                    resolved_content = source_content
 
                     existing_content = ""
                     if os.path.exists(dest_path):
@@ -632,29 +799,52 @@ def sync_repository(
 
                     if resolved_content != existing_content:
                         if dry_run:
-                            action = "add" if not existing_content else "update"
-                            print(f"[DRY RUN] Would {action}: {dest_rel_path}")
+                            action = (
+                                "add"
+                                if not existing_content
+                                else "update"
+                            )
+                            print(
+                                f"[DRY RUN] Would {action}: "
+                                f"{dest_rel_path}"
+                            )
                         else:
                             os.makedirs(
-                                os.path.dirname(dest_path), exist_ok=True,
+                                os.path.dirname(dest_path),
+                                exist_ok=True,
                             )
                             with open(dest_path, "w") as f:
                                 f.write(resolved_content)
-                            print(f"{dest_rel_path} updated (vars applied)")
+                            print(
+                                f"{dest_rel_path} updated "
+                                f"(content transformed)"
+                            )
                         files_changed.append(dest_rel_path)
                     else:
                         print(f"{dest_rel_path} is up to date")
                 elif dry_run:
                     if not os.path.exists(dest_path):
-                        print(f"[DRY RUN] Would add: {dest_rel_path}")
+                        print(
+                            f"[DRY RUN] Would add: "
+                            f"{dest_rel_path}"
+                        )
                         files_changed.append(dest_rel_path)
-                    elif not compare_files(str(source_path), dest_path):
-                        print(f"[DRY RUN] Would update: {dest_rel_path}")
+                    elif not compare_files(
+                        str(source_path), dest_path,
+                    ):
+                        print(
+                            f"[DRY RUN] Would update: "
+                            f"{dest_rel_path}"
+                        )
                         files_changed.append(dest_rel_path)
                     else:
                         print(f"{dest_rel_path} is up to date")
                 else:
-                    if sync_file(str(source_path), dest_path, dest_rel_path):
+                    if sync_file(
+                        str(source_path),
+                        dest_path,
+                        dest_rel_path,
+                    ):
                         files_changed.append(dest_rel_path)
 
             # Step 4: Generate and sync dependabot.yml
@@ -765,6 +955,52 @@ def main() -> None:
 
     config = load_sync_config(args.config)
 
+    # Detect or resolve release for workflow ref transformation
+    release_tag: Optional[str] = None
+    release_sha: Optional[str] = None
+
+    if args.release_ref:
+        # User provided an explicit tag — resolve it to SHA
+        print(f"Using release override: {args.release_ref}")
+        release_tag = args.release_ref
+        ref_endpoint = (
+            f"{GITHUB_API}/repos/{args.org}/{SOURCE_REPO}"
+            f"/git/ref/tags/{release_tag}"
+        )
+        status, data = github_api_request(ref_endpoint)
+        if status != 200:
+            print(
+                f"Error: Tag '{release_tag}' not found "
+                f"for {args.org}/{SOURCE_REPO}."
+            )
+            sys.exit(1)
+        # Handle annotated vs lightweight tags
+        if data.get("object", {}).get("type") == "tag":
+            tag_endpoint = (
+                f"{GITHUB_API}/repos/{args.org}"
+                f"/{SOURCE_REPO}"
+                f"/git/tags/{data['object']['sha']}"
+            )
+            _, tag_data = github_api_request(tag_endpoint)
+            release_sha = tag_data.get(
+                "object", {},
+            ).get("sha")
+        else:
+            release_sha = data.get(
+                "object", {},
+            ).get("sha")
+    else:
+        # Auto-detect latest release
+        release_tag, release_sha = get_latest_release(
+            args.org, SOURCE_REPO,
+        )
+
+    if release_tag and release_sha:
+        print(
+            f"Release ref: {release_tag} "
+            f"({release_sha[:12]})"
+        )
+
     # Fetch and parse peribolos.yml
     peribolos_data = fetch_peribolos_file(args.org)
     repositories = extract_repositories(peribolos_data, args.org)
@@ -793,7 +1029,11 @@ def main() -> None:
     success_count = 0
     for repo_name in repositories:
         try:
-            if sync_repository(args.org, repo_name, config, args.dry_run):
+            if sync_repository(
+                args.org, repo_name, config, args.dry_run,
+                release_tag=release_tag,
+                release_sha=release_sha,
+            ):
                 success_count += 1
         except Exception as e:
             print(f"Failed to process {repo_name}: {e}")

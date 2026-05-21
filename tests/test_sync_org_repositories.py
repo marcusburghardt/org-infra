@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 # Add scripts to path for import
@@ -14,7 +15,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 sync_module = importlib.import_module("sync-org-repositories")
 
+import pytest
+
 GITHUB_API = sync_module.GITHUB_API
+
+# Valid 40-character hex SHA for use in transform_workflow_refs tests.
+TEST_SHA = "a" * 40
 
 
 class TestValidateGithubApiRequest:
@@ -85,6 +91,33 @@ class TestValidateGithubApiRequest:
     def test_disallowed_get_app(self):
         result = sync_module.validate_github_api_request(f"{GITHUB_API}/app", "GET")
         assert not result
+
+    def test_allowed_get_releases_latest(self):
+        assert (
+            sync_module.validate_github_api_request(
+                f"{GITHUB_API}/repos/org/repo/releases/latest",
+                "GET",
+            )
+            is True
+        )
+
+    def test_allowed_get_git_ref_tags(self):
+        assert (
+            sync_module.validate_github_api_request(
+                f"{GITHUB_API}/repos/org/repo/git/ref/tags/v1.0.0",
+                "GET",
+            )
+            is True
+        )
+
+    def test_allowed_get_git_tags_sha(self):
+        assert (
+            sync_module.validate_github_api_request(
+                f"{GITHUB_API}/repos/org/repo/git/tags/abc123def456",
+                "GET",
+            )
+            is True
+        )
 
 
 class TestValidateBranchName:
@@ -649,3 +682,235 @@ class TestVarAwareFileComparison:
             source.read_text(), resolved_vars,
         )
         assert resolved_content == source.read_text()
+
+
+class TestTransformWorkflowRefs:
+    """Tests for transform_workflow_refs."""
+
+    def test_single_ref_transformed(self):
+        content = (
+            "    uses: ./.github/workflows/reusable_ci.yml\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "complytime", "org-infra",
+            TEST_SHA, "v1.0.0",
+        )
+        expected = (
+            "    uses: complytime/org-infra/"
+            ".github/workflows/"
+            f"reusable_ci.yml@{TEST_SHA} # v1.0.0\n"
+        )
+        assert result == expected
+
+    def test_multiple_refs_transformed(self):
+        content = (
+            "    uses: ./.github/workflows/reusable_ci.yml\n"
+            "    runs-on: ubuntu-latest\n"
+            "    uses: ./.github/workflows/reusable_lint.yml\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "complytime", "org-infra",
+            TEST_SHA, "v2.0.0",
+        )
+        assert f"reusable_ci.yml@{TEST_SHA} # v2.0.0" in result
+        assert f"reusable_lint.yml@{TEST_SHA} # v2.0.0" in result
+        assert "./.github/workflows/" not in result
+
+    def test_no_refs_passthrough(self):
+        content = (
+            "name: CI\n"
+            "on: push\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "complytime", "org-infra",
+            TEST_SHA, "v1",
+        )
+        assert result == content
+
+    def test_non_reusable_ref_not_transformed(self):
+        content = (
+            "    uses: ./.github/workflows/ci_checks.yml\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "complytime", "org-infra",
+            TEST_SHA, "v1",
+        )
+        assert result == content
+
+    def test_third_party_action_not_transformed(self):
+        content = (
+            "    uses: actions/checkout@abc123def456\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "complytime", "org-infra",
+            TEST_SHA, "v1",
+        )
+        assert result == content
+
+    def test_mixed_content(self):
+        content = (
+            "name: CI Pipeline\n"
+            "jobs:\n"
+            "  lint:\n"
+            "    uses: ./.github/workflows/reusable_lint.yml\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "  deploy:\n"
+            "    uses: ./.github/workflows/ci_deploy.yml\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "org", "repo", TEST_SHA, "v3.0.0",
+        )
+        # Reusable ref transformed
+        assert (
+            "uses: org/repo/.github/workflows/"
+            f"reusable_lint.yml@{TEST_SHA} # v3.0.0" in result
+        )
+        # Third-party action untouched
+        assert "uses: actions/checkout@v4" in result
+        # Non-reusable local ref untouched
+        assert (
+            "uses: ./.github/workflows/ci_deploy.yml" in result
+        )
+
+    def test_preserves_indentation(self):
+        content = (
+            "  uses: ./.github/workflows/reusable_a.yml\n"
+            "    uses: ./.github/workflows/reusable_b.yml\n"
+            "      uses: ./.github/workflows/reusable_c.yml\n"
+        )
+        result = sync_module.transform_workflow_refs(
+            content, "org", "repo", TEST_SHA, "v1",
+        )
+        lines = result.splitlines()
+        assert lines[0].startswith("  uses:")
+        assert lines[1].startswith("    uses:")
+        assert lines[2].startswith("      uses:")
+
+    def test_invalid_sha_raises_value_error(self):
+        with pytest.raises(ValueError, match="Invalid SHA format"):
+            sync_module.transform_workflow_refs(
+                "uses: ./.github/workflows/reusable_ci.yml",
+                "org", "repo", "not-a-valid-sha", "v1",
+            )
+
+    def test_short_sha_raises_value_error(self):
+        with pytest.raises(ValueError, match="Invalid SHA format"):
+            sync_module.transform_workflow_refs(
+                "uses: ./.github/workflows/reusable_ci.yml",
+                "org", "repo", "abc123", "v1",
+            )
+
+
+class TestGetLatestRelease:
+    """Tests for get_latest_release."""
+
+    @patch.object(sync_module, "github_api_request")
+    def test_lightweight_tag_returns_commit_sha(self, mock_api):
+        mock_api.side_effect = [
+            (200, {"tag_name": "v1.0.0"}),
+            (200, {"object": {"type": "commit", "sha": "abc123"}}),
+        ]
+        tag, sha = sync_module.get_latest_release("org", "repo")
+        assert tag == "v1.0.0"
+        assert sha == "abc123"
+
+    @patch.object(sync_module, "github_api_request")
+    def test_annotated_tag_dereferences_to_commit(self, mock_api):
+        mock_api.side_effect = [
+            (200, {"tag_name": "v1.0.0"}),
+            (
+                200,
+                {"object": {"type": "tag", "sha": "tag_obj_sha"}},
+            ),
+            (200, {"object": {"sha": "real_commit_sha"}}),
+        ]
+        tag, sha = sync_module.get_latest_release("org", "repo")
+        assert tag == "v1.0.0"
+        assert sha == "real_commit_sha"
+
+    @patch.object(sync_module, "github_api_request")
+    def test_no_release_exits(self, mock_api):
+        mock_api.return_value = (404, {"message": "Not Found"})
+        with pytest.raises(SystemExit) as exc_info:
+            sync_module.get_latest_release("org", "repo")
+        assert exc_info.value.code == 1
+
+    @patch.object(sync_module, "github_api_request")
+    def test_tag_resolution_fails_exits(self, mock_api):
+        mock_api.side_effect = [
+            (200, {"tag_name": "v1.0.0"}),
+            (404, {"message": "Not Found"}),
+        ]
+        with pytest.raises(SystemExit) as exc_info:
+            sync_module.get_latest_release("org", "repo")
+        assert exc_info.value.code == 1
+
+
+class TestWorkflowRefTransformComposition:
+    """Tests for composition of apply_file_vars and transform_workflow_refs."""
+
+    def test_vars_and_refs_compose(self):
+        content = (
+            "jobs:\n"
+            "  scan:\n"
+            "    uses: ./.github/workflows/"
+            "reusable_vuln_scan.yml\n"
+            "    with:\n"
+            "      enable_trivy_source: false\n"
+        )
+        # Apply vars first (change false to true)
+        with_vars = sync_module.apply_file_vars(
+            content, {"enable_trivy_source": "true"},
+        )
+        # Then transform workflow refs
+        result = sync_module.transform_workflow_refs(
+            with_vars, "org", "repo", TEST_SHA, "v1.0.0",
+        )
+        assert "enable_trivy_source: true" in result
+        assert (
+            "uses: org/repo/.github/workflows/"
+            f"reusable_vuln_scan.yml@{TEST_SHA} # v1.0.0"
+            in result
+        )
+        assert "./.github/workflows/" not in result
+
+    def test_vars_only_no_refs(self):
+        content = (
+            "jobs:\n"
+            "  scan:\n"
+            "    uses: actions/checkout@v4\n"
+            "    with:\n"
+            "      enable_trivy_source: false\n"
+        )
+        with_vars = sync_module.apply_file_vars(
+            content, {"enable_trivy_source": "true"},
+        )
+        result = sync_module.transform_workflow_refs(
+            with_vars, "org", "repo", TEST_SHA, "v1",
+        )
+        assert "enable_trivy_source: true" in result
+        assert "uses: actions/checkout@v4" in result
+
+    def test_refs_only_no_vars(self):
+        content = (
+            "jobs:\n"
+            "  lint:\n"
+            "    uses: ./.github/workflows/reusable_lint.yml\n"
+            "    with:\n"
+            "      some_input: value\n"
+        )
+        with_vars = sync_module.apply_file_vars(content, {})
+        result = sync_module.transform_workflow_refs(
+            with_vars, "org", "repo", TEST_SHA, "v1",
+        )
+        assert (
+            "uses: org/repo/.github/workflows/"
+            f"reusable_lint.yml@{TEST_SHA} # v1" in result
+        )
+        assert "some_input: value" in result
