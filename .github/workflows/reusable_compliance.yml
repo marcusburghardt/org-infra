@@ -43,6 +43,13 @@ jobs:
           repository: complytime/complyctl
           persist-credentials: false
 
+      - name: Checkout complytime-providers
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: complytime/complytime-providers
+          path: _providers
+          persist-credentials: false
+
       - name: Checkout calling repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -55,9 +62,14 @@ jobs:
         with:
           go-version-file: './go.mod'
 
-      - name: Build
+      - name: Build complyctl
         run: |
           make build
+
+      - name: Build ampel provider
+        working-directory: _providers
+        run: |
+          make build-ampel-provider
 
       - name: Install snappy
         uses: carabiner-dev/actions/install/snappy@e0e3b8149dafed833431095bc148d50e7eade4e8
@@ -65,10 +77,10 @@ jobs:
       - name: Install ampel
         uses: carabiner-dev/actions/install/ampel@e0e3b8149dafed833431095bc148d50e7eade4e8
 
-      - name: Register ampel-plugin provider with complyctl
+      - name: Register ampel provider with complyctl
         run: |
           mkdir -p ~/.complytime/providers
-          cp bin/ampel-plugin ~/.complytime/providers/complyctl-provider-ampel
+          cp _providers/bin/complyctl-provider-ampel ~/.complytime/providers/complyctl-provider-ampel
 
       - name: Start mock-oci-registry in background
         run: |
@@ -105,7 +117,7 @@ jobs:
       - name: Copy ampel policy files
         run: |
           mkdir -p .complytime/ampel/granular-policies
-          cp cmd/ampel-plugin/convert/testdata/policies/* .complytime/ampel/granular-policies/
+          cp _providers/cmd/ampel-provider/convert/testdata/policies/* .complytime/ampel/granular-policies/
 
       - name: Fetch ampel-branch-protection policy from mock registry
         run: ./bin/complyctl get
