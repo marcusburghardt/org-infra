@@ -14,5 +14,5 @@ pytest==9.0.3
 
 # Linting
 ruff==0.15.14
-yamllint==1.35.1
+yamllint==1.38.0
 
