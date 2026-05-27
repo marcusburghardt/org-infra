@@ -2,6 +2,23 @@
 # ============================
 # Builds and pushes container images with supply chain security artifacts.
 # Focused responsibility: build + push only.
+#
+# Security Layers (for unprotected refs):
+# - Layer 1: Workflow opt-in via allow_unprotected_ref input (default: false)
+# - Layer 2: Org membership verification via GitHub API
+# - Layer 3: Tag isolation (dev-sha-* and dev-* tags for unprotected refs)
+#
+# Tag Formats:
+# - Protected refs:   sha-<commit>, <branch> (e.g., sha-abc123, main)
+# - Unprotected refs: dev-sha-<commit>, dev-<branch> (e.g., dev-sha-abc123, dev-feat-xyz)
+#
+# Attestations (SLSA provenance + SBOM):
+# - generate_attestations='auto' (default): only for protected refs
+# - generate_attestations='true': always generate (even for unprotected refs)
+#
+# Org Membership Check (unprotected refs only):
+# - Public orgs: GITHUB_TOKEN works (has public membership read access)
+# - Private orgs: Provide org_check_token secret with PAT (org:read scope)
 
 name: Reusable Push Image
 
@@ -9,46 +26,66 @@ on:
   workflow_call:
     inputs:
       component_name:
-        description: 'Component name (e.g., compass, beacon-distro)'
+        description: "Component name (e.g., compass, beacon-distro)"
         required: true
         type: string
       containerfile_path:
-        description: 'Containerfile path relative to repo root'
+        description: "Containerfile path relative to repo root"
         required: true
         type: string
       context_path:
-        description: 'Build context path'
+        description: "Build context path"
         required: true
         type: string
       image_name:
-        description: 'Image name without registry (e.g., org/image-name)'
+        description: "Image name without registry (e.g., org/image-name)"
         required: true
         type: string
       image_description:
-        description: 'Image description for OCI label (defaults to component_name)'
+        description: "Image description for OCI label (defaults to component_name)"
         required: false
         type: string
       image_vendor:
-        description: 'Vendor name for OCI label'
+        description: "Vendor name for OCI label"
         required: false
         type: string
       force_rebuild:
-        description: 'Force rebuild without cache'
+        description: "Force rebuild without cache"
         required: false
         default: false
         type: boolean
       platforms:
-        description: 'Comma-separated target platforms'
+        description: "Comma-separated target platforms"
         required: false
-        default: 'linux/amd64'
+        default: "linux/amd64"
         type: string
+      allow_unprotected_ref:
+        description: "Allow builds from unprotected refs (PR branches). Default: false (protected refs only)"
+        required: false
+        default: false
+        type: boolean
+      generate_attestations:
+        description: "Generate SLSA provenance and SBOM. Values: auto (based on ref_protected), true (always). Default: auto"
+        required: false
+        default: "auto"
+        type: string
+    secrets:
+      org_check_token:
+        description: "PAT with org:read scope for private org membership checks. Falls back to GITHUB_TOKEN if not provided."
+        required: false
     outputs:
       digest:
-        description: 'Pushed image digest'
+        description: "Pushed image digest"
         value: ${{ jobs.push.outputs.digest }}
       image:
-        description: 'Full image name (ghcr.io/org/image)'
+        description: "Full image name (ghcr.io/org/image)"
         value: ${{ jobs.push.outputs.image }}
+      image_ref:
+        description: "Full image reference with tag (e.g., ghcr.io/org/image:sha-abc123 or ghcr.io/org/image:dev-sha-abc123)"
+        value: ${{ jobs.push.outputs.image_ref }}
+      tags:
+        description: "Multi-line string with all applied tags"
+        value: ${{ jobs.push.outputs.tags }}
 
 permissions:
   contents: none
@@ -59,26 +96,105 @@ permissions:
 
 concurrency:
   group: reusable-push-${{ inputs.image_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !github.ref_protected }}
 
 jobs:
   push:
-    if: ${{ github.ref_protected }}
+    if: ${{ github.ref_protected || inputs.allow_unprotected_ref }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read      # Checkout source code
-      packages: write     # Push to GHCR (and write cache)
-      actions: read       # Required for GHA cache access (Buildx layer caching)
-      id-token: write     # Required for GitHub attestations (OIDC token)
+      contents: read # Checkout source code
+      packages: write # Push to GHCR (and write cache)
+      actions: read # Required for GHA cache access (Buildx layer caching)
+      id-token: write # Required for GitHub attestations (OIDC token)
       attestations: write # Required for pushing attestations to GHCR
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
       image: ${{ steps.images.outputs.image }}
+      image_ref: ${{ steps.output_refs.outputs.image_ref }}
+      tags: ${{ steps.output_refs.outputs.tags }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Verify org membership
+        if: ${{ !github.ref_protected && inputs.allow_unprotected_ref }}
+        env:
+          GH_TOKEN: ${{ secrets.org_check_token != '' && secrets.org_check_token || secrets.GITHUB_TOKEN }}
+          ORG_CHECK_TOKEN_PROVIDED: ${{ secrets.org_check_token != '' }}
+          ACTOR: ${{ github.actor }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          echo "::notice::Checking if $ACTOR is a member of $ORG"
+
+          # Call GitHub API to check org membership
+          # -L follows 302 redirect to public_members endpoint when
+          # GITHUB_TOKEN lacks org-level read permission (expected for public orgs)
+          HTTP_STATUS=$(curl -s -L -o /tmp/org_check_response.json -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/$ORG/members/$ACTOR")
+
+          case $HTTP_STATUS in
+            204)
+              echo "::notice::✓ $ACTOR is a member of $ORG"
+              ;;
+            404)
+              echo "::error::✗ $ACTOR is NOT a member of $ORG"
+              echo "::error::Only organization members can push images from unprotected refs"
+              exit 1
+              ;;
+            401|403)
+              echo "::error::Authentication failed (HTTP $HTTP_STATUS)"
+              if [[ "$ORG_CHECK_TOKEN_PROVIDED" != "true" ]]; then
+                echo "::error::For private orgs, provide a PAT with 'org:read' scope via org_check_token secret"
+              fi
+              echo "::error::Response: $(cat /tmp/org_check_response.json)"
+              exit 1
+              ;;
+            *)
+              echo "::error::GitHub API request failed (HTTP $HTTP_STATUS)"
+              echo "::error::Response: $(cat /tmp/org_check_response.json)"
+              exit 1
+              ;;
+          esac
+
+      - name: Determine tag prefix
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          if [[ "$REF_PROTECTED" == "true" ]]; then
+            echo "TAG_PREFIX=" >> "$GITHUB_ENV"
+            echo "::notice::Protected ref detected - using production tags (sha-*, branch)"
+          else
+            echo "TAG_PREFIX=dev-" >> "$GITHUB_ENV"
+            echo "::notice::Unprotected ref detected - using dev tags (dev-sha-*, dev-branch)"
+          fi
+
+      - name: Resolve attestation policy
+        id: attestation_policy
+        env:
+          INPUT_GENERATE_ATTESTATIONS: ${{ inputs.generate_attestations }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          case "$INPUT_GENERATE_ATTESTATIONS" in
+            auto)
+              ENABLED="$REF_PROTECTED"
+              echo "::notice::Attestation policy: auto (ref_protected=$ENABLED)"
+              ;;
+            true)
+              ENABLED="true"
+              echo "::notice::Attestation policy: true (forced on)"
+              ;;
+            *)
+              echo "::error::Invalid generate_attestations value: $INPUT_GENERATE_ATTESTATIONS"
+              echo "::error::Must be 'auto' or 'true'"
+              exit 1
+              ;;
+          esac
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -105,7 +221,9 @@ jobs:
         with:
           images: ${{ steps.images.outputs.image }}
           tags: |
-            type=sha,format=long,prefix=sha-
+            type=sha,format=long,prefix=${{ env.TAG_PREFIX }}sha-,priority=1000
+            type=ref,event=branch,prefix=${{ env.TAG_PREFIX }}
+            type=ref,event=pr,prefix=${{ env.TAG_PREFIX }}
           flavor: |
             latest=false
           labels: |
@@ -138,7 +256,7 @@ jobs:
         run: echo "digest=${BUILD_DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Attest SLSA provenance
-        if: ${{ github.ref_protected }}
+        if: ${{ steps.attestation_policy.outputs.enabled == 'true' }}
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-name: ${{ steps.images.outputs.image }}
@@ -146,7 +264,7 @@ jobs:
           push-to-registry: true
 
       - name: Generate SBOM
-        if: ${{ github.ref_protected }}
+        if: ${{ steps.attestation_policy.outputs.enabled == 'true' }}
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ steps.images.outputs.image }}@${{ steps.build.outputs.digest }}
@@ -154,10 +272,32 @@ jobs:
           output-file: sbom.spdx.json
 
       - name: Attest SBOM
-        if: ${{ github.ref_protected }}
+        if: ${{ steps.attestation_policy.outputs.enabled == 'true' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-name: ${{ steps.images.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
+
+      - name: Set output references
+        id: output_refs
+        env:
+          IMAGE: ${{ steps.images.outputs.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # Extract primary tag (first line of metadata-action output)
+          # tags output contains full refs (ghcr.io/org/image:tag), strip to bare tag
+          PRIMARY_REF=$(echo "$TAGS" | head -n1)
+          PRIMARY_TAG="${PRIMARY_REF##*:}"
+
+          # Set outputs using grouped redirects
+          {
+            echo "image_ref=${IMAGE}:${PRIMARY_TAG}"
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice::Image reference: ${IMAGE}:${PRIMARY_TAG}"
+          echo "::notice::All tags: $(echo "$TAGS" | tr '\n' ' ')"

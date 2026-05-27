@@ -1,0 +1,283 @@
+name: Test GHCR Push
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/reusable_publish_ghcr.yml"
+      - ".github/workflows/ci_test_publish_ghcr.yml"
+      - ".github/ci-tests/ghcr-publish/Containerfile"
+
+permissions:
+  contents: read
+
+jobs:
+  check-changes:
+    name: Check Changed Files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      ghcr_files_changed: ${{ steps.filter.outputs.any_changed }}
+    steps:
+      - uses: tj-actions/changed-files@e9772d140489982e0e3704fea5ee93d536f1e275 # v47.0.5
+        id: filter
+        with:
+          files: |
+            .github/workflows/reusable_publish_ghcr.yml
+            .github/workflows/ci_test_publish_ghcr.yml
+            .github/ci-tests/ghcr-publish/**
+
+  test-unprotected-org-member:
+    name: Test Unprotected Ref (Org Member)
+    needs: check-changes
+    if: needs.check-changes.outputs.ghcr_files_changed == 'true'
+    uses: ./.github/workflows/reusable_publish_ghcr.yml
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+      id-token: write
+      attestations: write
+    with:
+      component_name: org-infra-test
+      containerfile_path: .github/ci-tests/ghcr-publish/Containerfile
+      context_path: .github/ci-tests/ghcr-publish
+      image_name: complytime/org-infra-test
+      allow_unprotected_ref: true
+
+  verify-unprotected:
+    name: Verify Unprotected Build
+    needs: test-unprotected-org-member
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Verify image_ref format
+        env:
+          IMAGE_REF: ${{ needs.test-unprotected-org-member.outputs.image_ref }}
+        run: |
+          echo "image_ref: $IMAGE_REF"
+          if [[ ! "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9-]+/[a-z0-9-]+:dev-sha-[a-f0-9]+$ ]]; then
+            echo "::error::image_ref does not match expected format (ghcr.io/org/image:dev-sha-HEX)"
+            echo "::error::Got: $IMAGE_REF"
+            exit 1
+          fi
+          echo "::notice::image_ref format valid: $IMAGE_REF"
+
+      - name: Verify digest format
+        env:
+          DIGEST: ${{ needs.test-unprotected-org-member.outputs.digest }}
+        run: |
+          echo "digest: $DIGEST"
+          if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::digest does not match expected format (sha256:<64 hex chars>)"
+            echo "::error::Got: $DIGEST"
+            exit 1
+          fi
+          echo "::notice::digest format valid: $DIGEST"
+
+      - name: Verify tag structure
+        env:
+          TAGS: ${{ needs.test-unprotected-org-member.outputs.tags }}
+        run: |
+          echo "tags output:"
+          echo "$TAGS"
+
+          # Must have exactly 2 lines (sha tag + branch tag)
+          LINE_COUNT=$(echo "$TAGS" | wc -l)
+          if [[ "$LINE_COUNT" -ne 2 ]]; then
+            echo "::error::Expected exactly 2 tag lines, got $LINE_COUNT"
+            exit 1
+          fi
+
+          # First line: full ref with dev-sha- tag
+          if ! echo "$TAGS" | head -n1 | grep -qE ':dev-sha-[a-f0-9]+$'; then
+            echo "::error::First tag line does not match :dev-sha-HEX pattern"
+            exit 1
+          fi
+
+          # Second line: full ref with dev-<branch> tag
+          if ! echo "$TAGS" | tail -n1 | grep -qE ':dev-[a-z0-9][a-z0-9._-]*$'; then
+            echo "::error::Second tag line does not match :dev-<branch> pattern"
+            exit 1
+          fi
+
+          echo "::notice::Tag structure valid (2 lines, dev-prefixed)"
+
+      - name: Login to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image is pullable
+        env:
+          IMAGE_REF: ${{ needs.test-unprotected-org-member.outputs.image_ref }}
+        run: |
+          echo "Attempting to pull $IMAGE_REF"
+          docker pull "$IMAGE_REF"
+          docker run --rm "$IMAGE_REF"
+
+      - name: Verify OCI labels
+        env:
+          IMAGE_REF: ${{ needs.test-unprotected-org-member.outputs.image_ref }}
+        run: |
+          echo "Inspecting labels on $IMAGE_REF"
+
+          TITLE=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.title" }}' "$IMAGE_REF")
+          if [[ "$TITLE" != "org-infra-test" ]]; then
+            echo "::error::Expected title label 'org-infra-test', got: '$TITLE'"
+            exit 1
+          fi
+          echo "::notice::title label: $TITLE"
+
+          DESC=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.description" }}' "$IMAGE_REF")
+          if [[ -z "$DESC" ]]; then
+            echo "::error::description label is empty"
+            exit 1
+          fi
+          echo "::notice::description label: $DESC"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify NO attestations generated (auto mode)
+        env:
+          IMAGE: ${{ needs.test-unprotected-org-member.outputs.image }}
+          DIGEST: ${{ needs.test-unprotected-org-member.outputs.digest }}
+        run: |
+          echo "Verifying attestations are absent for ${IMAGE}@${DIGEST}"
+          echo "auto mode on unprotected ref should NOT produce attestations"
+
+          if cosign verify-attestation \
+              --type https://slsa.dev/provenance/v1 \
+              --certificate-identity-regexp=".*" \
+              --certificate-oidc-issuer-regexp=".*" \
+              "${IMAGE}@${DIGEST}" 2>/dev/null; then
+            echo "::error::SLSA provenance attestation found but should be absent"
+            echo "::error::auto mode on unprotected ref must suppress attestations"
+            exit 1
+          fi
+
+          echo "::notice::Confirmed: no SLSA provenance (auto mode, unprotected ref)"
+
+      - name: Cleanup test image
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REF_OUTPUT: ${{ needs.test-unprotected-org-member.outputs.image_ref }}
+        run: |
+          # Parse tag from image_ref (format: ghcr.io/org/image:tag)
+          IMAGE_REF="$IMAGE_REF_OUTPUT"
+          TAG="${IMAGE_REF##*:}"
+
+          echo "Deleting package version with tag: $TAG"
+
+          # List all versions and find the one with our tag
+          gh api "/orgs/complytime/packages/container/org-infra-test/versions" \
+            --jq ".[] | select(.metadata.container.tags[] | . == \"$TAG\") | .id" | \
+          while read -r VERSION_ID; do
+            echo "Deleting version ID: $VERSION_ID"
+            gh api --method DELETE "/orgs/complytime/packages/container/org-infra-test/versions/$VERSION_ID" \
+              || echo "Failed to delete version $VERSION_ID"
+          done
+
+  test-attestations-override:
+    name: Test Attestations Override
+    needs: check-changes
+    if: needs.check-changes.outputs.ghcr_files_changed == 'true'
+    uses: ./.github/workflows/reusable_publish_ghcr.yml
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+      id-token: write
+      attestations: write
+    with:
+      component_name: org-infra-test-attest
+      containerfile_path: .github/ci-tests/ghcr-publish/Containerfile
+      context_path: .github/ci-tests/ghcr-publish
+      image_name: complytime/org-infra-test-attest
+      allow_unprotected_ref: true
+      # This can be one of "auto" or "true" (string)
+      generate_attestations: ${{ 'true' }} # zizmor: ignore[obfuscation] - Actionlint does not support inline suppression
+
+  verify-attestations:
+    name: Verify Attestations Generated
+    needs: test-attestations-override
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Login to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify SLSA provenance attestation
+        env:
+          IMAGE: ${{ needs.test-attestations-override.outputs.image }}
+          DIGEST: ${{ needs.test-attestations-override.outputs.digest }}
+        run: |
+          echo "Checking SLSA provenance for ${IMAGE}@${DIGEST}"
+
+          cosign verify-attestation \
+            --type https://slsa.dev/provenance/v1 \
+            --certificate-identity-regexp="^https://github.com/complytime/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${DIGEST}" || {
+              echo "::error::SLSA provenance attestation not found"
+              exit 1
+            }
+
+          echo "::notice::✓ SLSA provenance verified"
+
+      - name: Verify SBOM attestation
+        env:
+          IMAGE: ${{ needs.test-attestations-override.outputs.image }}
+          DIGEST: ${{ needs.test-attestations-override.outputs.digest }}
+        run: |
+          echo "Checking SBOM for ${IMAGE}@${DIGEST}"
+
+          cosign verify-attestation \
+            --type https://spdx.dev/Document/v2.3 \
+            --certificate-identity-regexp="^https://github.com/complytime/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${DIGEST}" || {
+              echo "::error::SBOM attestation not found"
+              exit 1
+            }
+
+          echo "::notice::✓ SBOM attestation verified"
+
+      - name: Cleanup test image with attestations
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REF_OUTPUT: ${{ needs.test-attestations-override.outputs.image_ref }}
+        run: |
+          # Parse tag from image_ref
+          IMAGE_REF="$IMAGE_REF_OUTPUT"
+          TAG="${IMAGE_REF##*:}"
+
+          echo "Deleting package version with tag: $TAG"
+
+          # List all versions and find the one with our tag
+          gh api "/orgs/complytime/packages/container/org-infra-test-attest/versions" \
+            --jq ".[] | select(.metadata.container.tags[] | . == \"$TAG\") | .id" | \
+          while read -r VERSION_ID; do
+            echo "Deleting version ID: $VERSION_ID"
+            gh api --method DELETE "/orgs/complytime/packages/container/org-infra-test-attest/versions/$VERSION_ID" \
+              || echo "Failed to delete version $VERSION_ID"
+          done
