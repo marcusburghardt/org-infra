@@ -95,6 +95,7 @@ jobs:
         run: |
           COUNT=$(jq '[.runs[].results[] | select(.level == "error")] | length' "$SARIF_FILE")
           [ "$COUNT" -eq 0 ] || { echo "::error::Found $COUNT HIGH/CRITICAL vulns"; exit 1; }
+          echo "passed=true" >> "$GITHUB_OUTPUT"
 
       # Attestation: attach vuln scan proof to image (travels with cosign copy)
       - name: Install Cosign
