@@ -96,34 +96,43 @@ jobs:
           SRC_TOKEN: ${{ secrets.source_token || secrets.GITHUB_TOKEN }}
           DEST_USER: ${{ secrets.dest_username }}
           DEST_PASS: ${{ secrets.dest_password }}
+          SOURCE_REGISTRY: ${{ inputs.source_registry }}
+          DEST_REGISTRY: ${{ inputs.dest_registry }}
+          ACTOR: ${{ github.actor }}
         run: |
-          echo "$SRC_TOKEN" | crane auth login ${{ inputs.source_registry }} -u ${{ github.actor }} --password-stdin
-          echo "$SRC_TOKEN" | cosign login ${{ inputs.source_registry }} -u ${{ github.actor }} --password-stdin
-          echo "$DEST_PASS" | crane auth login ${{ inputs.dest_registry }} -u "$DEST_USER" --password-stdin
-          echo "$DEST_PASS" | cosign login ${{ inputs.dest_registry }} -u "$DEST_USER" --password-stdin
+          echo "$SRC_TOKEN" | crane auth login "$SOURCE_REGISTRY" -u "$ACTOR" --password-stdin
+          echo "$SRC_TOKEN" | cosign login "$SOURCE_REGISTRY" -u "$ACTOR" --password-stdin
+          echo "$DEST_PASS" | crane auth login "$DEST_REGISTRY" -u "$DEST_USER" --password-stdin
+          echo "$DEST_PASS" | cosign login "$DEST_REGISTRY" -u "$DEST_USER" --password-stdin
 
       - name: Resolve source digest
         id: resolve
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
-          DIGEST=$(crane digest "${SOURCE_REF}:${{ inputs.source_tag }}") || {
-            echo "::error::Source not found: ${SOURCE_REF}:${{ inputs.source_tag }}"
+          DIGEST=$(crane digest "${SOURCE_REF}:${SOURCE_TAG}") || {
+            echo "::error::Source not found: ${SOURCE_REF}:${SOURCE_TAG}"
             exit 1
           }
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Check destination availability
         if: ${{ inputs.fail_if_dest_exists }}
+        env:
+          DEST_TAG: ${{ inputs.dest_tag }}
         run: |
-          if crane manifest "${DEST_REF}:${{ inputs.dest_tag }}" &>/dev/null; then
-            echo "::error::Tag exists: ${DEST_REF}:${{ inputs.dest_tag }}"
+          if crane manifest "${DEST_REF}:${DEST_TAG}" &>/dev/null; then
+            echo "::error::Tag exists: ${DEST_REF}:${DEST_TAG}"
             echo "Use fail_if_dest_exists: false to overwrite"
             exit 1
           fi
 
       - name: Verify source signature
         if: ${{ inputs.verify_signature }}
+        env:
+          DIGEST: ${{ steps.resolve.outputs.digest }}
         run: |
-          cosign verify "${SOURCE_REF}@${{ steps.resolve.outputs.digest }}" \
+          cosign verify "${SOURCE_REF}@${DIGEST}" \
             --certificate-identity-regexp="$IDENTITY" \
             --certificate-oidc-issuer="$OIDC_ISSUER"
 
@@ -131,11 +140,14 @@ jobs:
         env:
           DIGEST: ${{ steps.resolve.outputs.digest }}
           SOURCE_TAG: ${{ inputs.source_tag }}
+          DEST_TAG: ${{ inputs.dest_tag }}
+          INCLUDE_SHA_TAGS: ${{ inputs.include_sha_tags }}
+          ADDITIONAL_TAGS: ${{ inputs.additional_tags }}
         run: |
-          cosign copy "${SOURCE_REF}@${DIGEST}" "${DEST_REF}:${{ inputs.dest_tag }}"
+          cosign copy "${SOURCE_REF}@${DIGEST}" "${DEST_REF}:${DEST_TAG}"
 
           # SHA tags for immutability (long + short)
-          if [[ "${{ inputs.include_sha_tags }}" == "true" ]]; then
+          if [[ "$INCLUDE_SHA_TAGS" == "true" ]]; then
             crane tag "${DEST_REF}@${DIGEST}" "${SOURCE_TAG}"
             # Short SHA: first 7 chars after 'sha-' prefix
             if [[ "$SOURCE_TAG" =~ ^sha-([a-f0-9]+)$ ]]; then
@@ -144,8 +156,8 @@ jobs:
           fi
 
           # Additional custom tags
-          if [[ -n "${{ inputs.additional_tags }}" ]]; then
-            IFS=',' read -ra TAGS <<< "${{ inputs.additional_tags }}"
+          if [[ -n "$ADDITIONAL_TAGS" ]]; then
+            IFS=',' read -ra TAGS <<< "$ADDITIONAL_TAGS"
             for TAG in "${TAGS[@]}"; do
               crane tag "${DEST_REF}@${DIGEST}" "${TAG// /}"
             done
@@ -153,7 +165,9 @@ jobs:
 
       - name: Verify destination signature
         if: ${{ inputs.verify_signature }}
+        env:
+          DIGEST: ${{ steps.resolve.outputs.digest }}
         run: |
-          cosign verify "${DEST_REF}@${{ steps.resolve.outputs.digest }}" \
+          cosign verify "${DEST_REF}@${DIGEST}" \
             --certificate-identity-regexp="$IDENTITY" \
             --certificate-oidc-issuer="$OIDC_ISSUER"
