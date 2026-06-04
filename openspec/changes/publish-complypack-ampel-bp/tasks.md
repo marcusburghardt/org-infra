@@ -67,3 +67,4 @@
 - [x] 9.4 Verify the renamed `reusable_publish_quay.yml` has no broken in-repo references (grep for old name)
 - [x] 9.5 Verify neither `reusable_publish_complypack.yml` nor `ci_publish_complypack.yml` appear in `sync-config.yml`
 <!-- spec-review: passed -->
+<!-- code-review: passed -->
