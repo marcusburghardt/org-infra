@@ -66,3 +66,4 @@
 - [ ] 9.3 Verify workflow-level permissions are set to `none` and job-level permissions are minimal
 - [ ] 9.4 Verify the renamed `reusable_publish_quay.yml` has no broken in-repo references (grep for old name)
 - [ ] 9.5 Verify neither `reusable_publish_complypack.yml` nor `ci_publish_complypack.yml` appear in `sync-config.yml`
+<!-- spec-review: passed -->
