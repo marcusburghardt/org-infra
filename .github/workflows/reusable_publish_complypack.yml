@@ -1,0 +1,218 @@
+# Reusable Publish Complypack Workflow
+# =====================================
+# Packs a content directory into a complypack OCI artifact and pushes it to GHCR
+# using the complypack CLI (github.com/complytime/complypack).
+#
+# Generates a complypack.yaml config at workflow time from input parameters
+# (evaluator_id, complypack_id, complypack_version) — no checked-in config file required.
+#
+# Supply chain attestations (SLSA provenance + SBOM) follow the same policy as
+# reusable_publish_ghcr.yml: auto (based on ref_protected) or true (always).
+#
+# Downstream: chain reusable_sign_and_verify.yml (with verify_vuln: false)
+# for keyless signing and reusable_publish_quay.yml for Quay promotion.
+
+name: Reusable Publish Complypack
+
+on:
+  workflow_call:
+    inputs:
+      content_path:
+        description: 'Directory containing policy files to pack'
+        required: true
+        type: string
+      image_name:
+        description: 'Image name without registry (e.g., complytime/complypack-ampel-branch-protection)'
+        required: true
+        type: string
+      tag:
+        description: 'Image tag (e.g., sha-abc123, v1.0.0)'
+        required: true
+        type: string
+      evaluator_id:
+        description: 'Evaluator ID for complypack config (e.g., ampel)'
+        required: true
+        type: string
+      complypack_id:
+        description: 'Globally unique pack identifier'
+        required: true
+        type: string
+      complypack_version:
+        description: 'Version to embed in complypack config'
+        required: true
+        type: string
+      go_version:
+        description: 'Go version for setup-go'
+        required: false
+        default: 'stable'
+        type: string
+      complypack_cli_ref:
+        description: >-
+          Go install ref for complypack CLI (e.g., latest, v0.1.0).
+          Callers SHOULD pin to a specific release tag for reproducibility.
+          Default is latest because complypack has no formal releases yet.
+        required: false
+        default: 'latest'
+        type: string
+      generate_attestations:
+        description: "Generate SLSA provenance and SBOM. Values: auto (based on ref_protected), true (always). Default: auto"
+        required: false
+        default: 'auto'
+        type: string
+    outputs:
+      digest:
+        description: 'Pushed artifact digest (sha256:...)'
+        value: ${{ jobs.publish.outputs.digest }}
+      image:
+        description: 'Full image reference (ghcr.io/<image_name>)'
+        value: ${{ jobs.publish.outputs.image }}
+      tag:
+        description: 'Tag used for the push'
+        value: ${{ jobs.publish.outputs.tag }}
+
+permissions:
+  contents: none
+  packages: none
+  id-token: none
+  attestations: none
+  actions: none
+
+concurrency:
+  group: reusable-complypack-${{ inputs.image_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: ${{ github.ref_protected }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read       # Checkout source for policy files
+      packages: write      # Push artifact and attestations to GHCR
+      id-token: write      # OIDC token for GitHub attestations
+      attestations: write  # Write attestations to GHCR
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      image: ${{ steps.image_ref.outputs.image }}
+      tag: ${{ steps.image_ref.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ inputs.go_version }}
+
+      - name: Install complypack CLI
+        env:
+          COMPLYPACK_CLI_REF: ${{ inputs.complypack_cli_ref }}
+        run: go install "github.com/complytime/complypack/cmd/complypack@${COMPLYPACK_CLI_REF}"
+
+      - name: Generate complypack.yaml
+        env:
+          COMPLYPACK_ID: ${{ inputs.complypack_id }}
+          EVALUATOR_ID: ${{ inputs.evaluator_id }}
+          COMPLYPACK_VERSION: ${{ inputs.complypack_version }}
+          CONTENT_PATH: ${{ inputs.content_path }}
+        run: |
+          cat > "${CONTENT_PATH}/complypack.yaml" <<COMPLYPACK_EOF
+          id: ${COMPLYPACK_ID}
+          evaluator-id: ${EVALUATOR_ID}
+          version: ${COMPLYPACK_VERSION}
+          COMPLYPACK_EOF
+
+      - name: Pack and push complypack artifact
+        env:
+          CONTENT_PATH: ${{ inputs.content_path }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAG: ${{ inputs.tag }}
+        run: complypack pack "${CONTENT_PATH}" "ghcr.io/${IMAGE_NAME}:${TAG}"
+
+      - name: Set image reference
+        id: image_ref
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "image=ghcr.io/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+        with:
+          version: 1.3.0
+
+      - name: Fetch digest
+        id: digest
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          DIGEST=$(oras manifest fetch "ghcr.io/${IMAGE_NAME}:${TAG}" \
+            --descriptor | jq -r '.digest')
+          if ! echo "$DIGEST" | grep -qE '^sha256:[a-f0-9]{64}$'; then
+            echo "::error::Unexpected digest format: '${DIGEST}'"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # NOTE: This step is duplicated in reusable_publish_ghcr.yml.
+      # If a third workflow needs it, extract to a composite action.
+      - name: Resolve attestation policy
+        id: attestation_policy
+        env:
+          INPUT_GENERATE_ATTESTATIONS: ${{ inputs.generate_attestations }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          case "$INPUT_GENERATE_ATTESTATIONS" in
+            auto)
+              ENABLED="$REF_PROTECTED"
+              echo "::notice::Attestation policy: auto (ref_protected=$ENABLED)"
+              ;;
+            true)
+              ENABLED="true"
+              echo "::notice::Attestation policy: true (forced on)"
+              ;;
+            *)
+              echo "::error::Invalid generate_attestations value: $INPUT_GENERATE_ATTESTATIONS"
+              echo "::error::Must be 'auto' or 'true'"
+              exit 1
+              ;;
+          esac
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+
+      - name: Attest SLSA provenance
+        if: ${{ steps.attestation_policy.outputs.enabled == 'true' }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ steps.image_ref.outputs.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate SBOM
+        if: ${{ steps.attestation_policy.outputs.enabled == 'true' }}
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: ${{ inputs.content_path }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attest SBOM
+        if: ${{ steps.attestation_policy.outputs.enabled == 'true' }}
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ steps.image_ref.outputs.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true

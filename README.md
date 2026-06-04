@@ -32,6 +32,7 @@ org-infra/
 │  ├── workflows/
 │  │  ├── ci_checks.yml                     # Workflow to consume `reusable_ci`.
 │  │  ├── ci_compliance.yml                 # Workflow to consume `reusable_compliance`.
+│  │  ├── ci_publish_complypack.yml         # Publish ampel complypack to GHCR (push) and Quay (release).
 │  │  ├── ci_dependencies.yml               # Workflow to consume `reusable_dependabot_reviewer` and `reusable_deps_reviewer`
 │  │  │                                     # plus local jobs to auto-approve and comment on dependabot PRs.
 │  │  ├── ci_scheduled.yml                  # Scheduled OSV-Scanner and OpenSSF Scorecards via `reusable_scheduled`.
@@ -43,8 +44,10 @@ org-infra/
 │  │  ├── reusable_dependabot_reviewer.yml  # Specific for dependabot PRs. Classify risk and checks dependency adoption.
 │  │  ├── reusable_deps_reviewer.yml        # Check for vulnerabilities, license issues, and OpenSSF Scorecard Level.
 │  │  ├── reusable_gemini_review.yml        # AI-powered code review using Google Gemini to review pull requests.
+│  │  ├── reusable_publish_complypack.yml   # Pack and push complypack OCI artifacts to GHCR with provenance and SBOM.
 │  │  ├── reusable_publish_ghcr.yml         # Build and push container images to GHCR with supply chain security artifacts.
-│  │  ├── resuable_publish_quay.yml         # Promote images between registries with signature verification.
+│  │  ├── reusable_publish_oras.yml         # Push arbitrary files as OCI artifacts to GHCR via ORAS CLI.
+│  │  ├── reusable_publish_quay.yml         # Promote images between registries with signature verification.
 │  │  ├── reusable_scheduled.yml            # Scheduled OSV-Scanner and OpenSSF Scorecards.
 │  │  ├── reusable_security.yml             # OpenSSF Scorecards analysis and SARIF upload.
 │  │  ├── reusable_sign_and_verify.yml      # Sigstore keyless signing and attestation verification for container images.
