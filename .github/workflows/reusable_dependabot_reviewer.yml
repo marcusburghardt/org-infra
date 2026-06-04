@@ -23,6 +23,9 @@ on:
       release_age_hours:
         description: "Hours since the dependency version was released, -1 if unknown"
         value: "${{ jobs.dependabot_review.outputs.release_age_hours }}"
+      is_org_owned:
+        description: "Whether the dependency belongs to the same GitHub org as the consuming repo"
+        value: "${{ jobs.dependabot_review.outputs.is_org_owned }}"
 
 # This workflow is passive so ensure the minimal permissions even if the
 # inherited token is more lenient.
@@ -43,6 +46,7 @@ jobs:
       dep_name: "${{ steps.get_dep_info.outputs.dep_name }}"
       dep_version: "${{ steps.get_dep_info.outputs.dep_version }}"
       release_age_hours: "${{ steps.check_release_age.outputs.release_age_hours }}"
+      is_org_owned: "${{ steps.detect_org_ownership.outputs.is_org_owned }}"
 
     steps:
       - name: Checkout Repository
@@ -157,6 +161,29 @@ jobs:
           echo "dep_version=${dep_version_final}" >> "$GITHUB_OUTPUT"
 
           echo "Final: DEP_NAME=$dep_name DEP_VERSION=$dep_version_final FROM=$from_version TO=$to_version TYPE=$update_type USES=$uses_query"
+
+      - name: Detect Org Ownership
+        id: detect_org_ownership
+        shell: bash
+        env:
+          REPO_OWNER: "${{ github.repository_owner }}"
+        run: |
+          dep="$DEP_NAME"
+          is_org_owned="false"
+
+          if [[ -n "$dep" ]]; then
+            dep_owner="$(echo "$dep" | cut -d'/' -f1)"
+            if [[ "$dep_owner" == "$REPO_OWNER" ]]; then
+              is_org_owned="true"
+              echo "Org-owned dependency: $dep (owner=$dep_owner matches $REPO_OWNER)"
+            else
+              echo "Third-party dependency: $dep (owner=$dep_owner != $REPO_OWNER)"
+            fi
+          else
+            echo "No dependency name available. Defaulting to third-party."
+          fi
+
+          echo "is_org_owned=$is_org_owned" >> "$GITHUB_OUTPUT"
 
       - name: Classify Risk Based on Semantic Version
         id: classify_risk
