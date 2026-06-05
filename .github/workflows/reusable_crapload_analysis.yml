@@ -82,6 +82,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Checkout org-infra scripts
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflow-scripts
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - name: Detect changed packages
         id: detect-changes
         if: github.event_name == 'pull_request'
@@ -144,7 +153,7 @@ jobs:
           fi
 
           # Use the resolution script for consistent behavior
-          RESOLVED=$(bash scripts/resolve-go-packages.sh "$PACKAGES_INPUT")
+          RESOLVED=$(bash .workflow-scripts/scripts/resolve-go-packages.sh "$PACKAGES_INPUT")
           echo "packages=$RESOLVED" >> "$GITHUB_OUTPUT"
 
       - name: Install Gaze
@@ -199,7 +208,7 @@ jobs:
           GAZE_VERSION: ${{ inputs.gaze-version }}
         run: |
           # Call external script to avoid actionlint hang on large inline bash blocks
-          bash scripts/compare-crapload.sh \
+          bash .workflow-scripts/scripts/compare-crapload.sh \
             "/tmp/crapload-current.json" \
             "$BASELINE" \
             "$NEW_FUNC_THRESHOLD" \
