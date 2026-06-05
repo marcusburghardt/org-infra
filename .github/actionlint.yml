@@ -1,0 +1,15 @@
+# actionlint configuration
+# https://github.com/rhysd/actionlint/blob/main/docs/config.md
+#
+# actionlint v1.7.12 does not recognise the job.workflow_repository,
+# job.workflow_sha, and job.workflow_ref properties added by GitHub
+# for reusable workflows. These are documented context properties:
+# https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/accessing-contextual-information-about-workflow-runs#job-context
+#
+# Suppress false positives until actionlint ships updated type
+# definitions. Scoped to reusable workflows only, where these
+# properties are available.
+paths:
+  .github/workflows/reusable_*.yml:
+    ignore:
+      - 'property "workflow_(repository|sha|ref)" is not defined in object type'
