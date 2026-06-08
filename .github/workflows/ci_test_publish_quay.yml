@@ -1,0 +1,243 @@
+# Test Promote Image Workflow
+# Validates crane copy + cosign sign promotion using GHCR-to-GHCR.
+# Exercises the same commands as resuable_publish_quay.yml without
+# requiring Quay credentials.
+
+name: Test Quay Promote
+
+"on":
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/resuable_publish_quay.yml"
+      - ".github/workflows/ci_test_publish_quay.yml"
+      - ".github/ci-tests/ghcr-publish/Containerfile"
+
+permissions:
+  contents: read
+
+jobs:
+  check-changes:
+    name: Check Changed Files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      quay_files_changed: ${{ steps.filter.outputs.any_changed }}
+    steps:
+      - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.5
+        id: filter
+        with:
+          files: |
+            .github/workflows/resuable_publish_quay.yml
+            .github/workflows/ci_test_publish_quay.yml
+            .github/ci-tests/ghcr-publish/**
+
+  build-source:
+    name: Build Source Image
+    needs: check-changes
+    if: >-
+      needs.check-changes.outputs.quay_files_changed == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    uses: ./.github/workflows/reusable_publish_ghcr.yml
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+      id-token: write
+      attestations: write
+    with:
+      component_name: ci-test-promote-src
+      containerfile_path: .github/ci-tests/ghcr-publish/Containerfile
+      context_path: .github/ci-tests/ghcr-publish
+      image_name: complytime/ci-test-promote-src
+      allow_unprotected_ref: true
+
+  test-promote:
+    name: Promote GHCR to GHCR
+    needs: build-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+      id-token: write
+    outputs:
+      dest_tag: ${{ steps.promote.outputs.dest_tag }}
+    env:
+      SOURCE_IMAGE: ${{ needs.build-source.outputs.image }}
+      SOURCE_DIGEST: ${{ needs.build-source.outputs.digest }}
+      DEST_IMAGE: ghcr.io/complytime/ci-test-promote-dest
+      IDENTITY: https://github.com/complytime/.*
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: imjasonh/setup-crane@59c71e96a00b28651f10369ba3359a6d730740a0 # v0.6
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Login to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign source image
+        run: |
+          echo "Signing source: ${SOURCE_IMAGE}@${SOURCE_DIGEST}"
+          cosign sign --yes "${SOURCE_IMAGE}@${SOURCE_DIGEST}"
+          echo "::notice::Source image signed"
+
+      - name: Verify source signature
+        run: |
+          echo "Verifying source signature: ${SOURCE_IMAGE}@${SOURCE_DIGEST}"
+          echo "Identity: $IDENTITY"
+          cosign verify "${SOURCE_IMAGE}@${SOURCE_DIGEST}" \
+            --certificate-identity-regexp="$IDENTITY" \
+            --certificate-oidc-issuer="$OIDC_ISSUER"
+          echo "::notice::Source signature verified"
+
+      - name: Promote via crane copy
+        id: promote
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          DEST_TAG="test-promote-${RUN_ID}"
+          crane copy "${SOURCE_IMAGE}@${SOURCE_DIGEST}" "${DEST_IMAGE}:${DEST_TAG}"
+          echo "dest_tag=${DEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Promoted ${SOURCE_IMAGE}@${SOURCE_DIGEST} to ${DEST_IMAGE}:${DEST_TAG}"
+
+      - name: Verify digest preserved
+        env:
+          DEST_TAG: ${{ steps.promote.outputs.dest_tag }}
+        run: |
+          ACTUAL=$(crane digest "${DEST_IMAGE}:${DEST_TAG}")
+          if [[ "$ACTUAL" != "$SOURCE_DIGEST" ]]; then
+            echo "::error::Digest mismatch after crane copy"
+            echo "::error::Source: $SOURCE_DIGEST"
+            echo "::error::Destination: $ACTUAL"
+            exit 1
+          fi
+          echo "::notice::Digest preserved: $ACTUAL"
+
+      - name: Sign destination image
+        run: |
+          echo "Signing destination: ${DEST_IMAGE}@${SOURCE_DIGEST}"
+          cosign sign --yes "${DEST_IMAGE}@${SOURCE_DIGEST}"
+          echo "::notice::Destination image signed"
+
+      - name: Verify destination signature
+        run: |
+          echo "Verifying destination signature: ${DEST_IMAGE}@${SOURCE_DIGEST}"
+          echo "Identity: $IDENTITY"
+          cosign verify "${DEST_IMAGE}@${SOURCE_DIGEST}" \
+            --certificate-identity-regexp="$IDENTITY" \
+            --certificate-oidc-issuer="$OIDC_ISSUER"
+          echo "::notice::Destination signature verified"
+
+  verify-promote:
+    name: Verify Promoted Image
+    needs: [build-source, test-promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      DEST_IMAGE: ghcr.io/complytime/ci-test-promote-dest
+      DEST_TAG: ${{ needs.test-promote.outputs.dest_tag }}
+      SOURCE_DIGEST: ${{ needs.build-source.outputs.digest }}
+      IDENTITY: https://github.com/complytime/.*
+      OIDC_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image is pullable
+        run: |
+          echo "Pulling ${DEST_IMAGE}:${DEST_TAG}"
+          docker pull "${DEST_IMAGE}:${DEST_TAG}"
+          docker run --rm "${DEST_IMAGE}:${DEST_TAG}"
+
+      - name: Verify OCI labels preserved
+        run: |
+          TITLE=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.title" }}' "${DEST_IMAGE}:${DEST_TAG}")
+          if [[ -z "$TITLE" ]]; then
+            echo "::error::OCI title label missing after promotion"
+            exit 1
+          fi
+          echo "::notice::OCI title label preserved: $TITLE"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify destination signature independently
+        run: |
+          cosign verify "${DEST_IMAGE}@${SOURCE_DIGEST}" \
+            --certificate-identity-regexp="$IDENTITY" \
+            --certificate-oidc-issuer="$OIDC_ISSUER"
+          echo "::notice::Independent signature verification passed"
+
+      - name: Confirm independent signature
+        env:
+          SOURCE_IMAGE: ${{ needs.build-source.outputs.image }}
+        run: |
+          echo "Source: ${SOURCE_IMAGE}, Dest: ${DEST_IMAGE}"
+          echo "Both share digest ${SOURCE_DIGEST} but have independent signatures"
+          echo "::notice::crane copy + cosign sign produces independent signatures as expected"
+
+  cleanup:
+    name: Cleanup Test Images
+    needs: [build-source, test-promote, verify-promote]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Cleanup source test image
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REF_OUTPUT: ${{ needs.build-source.outputs.image_ref }}
+        run: |
+          if [[ -z "$IMAGE_REF_OUTPUT" ]]; then
+            echo "No source image to clean up"
+            exit 0
+          fi
+
+          TAG="${IMAGE_REF_OUTPUT##*:}"
+          echo "Deleting source package versions with tag: $TAG"
+
+          gh api "/orgs/complytime/packages/container/ci-test-promote-src/versions" \
+            --jq ".[] | select(.metadata.container.tags[] | . == \"$TAG\") | .id" | \
+          while read -r VERSION_ID; do
+            echo "Deleting version ID: $VERSION_ID"
+            gh api --method DELETE "/orgs/complytime/packages/container/ci-test-promote-src/versions/$VERSION_ID" \
+              || echo "Failed to delete version $VERSION_ID"
+          done
+
+      - name: Cleanup destination test image
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEST_TAG: ${{ needs.test-promote.outputs.dest_tag }}
+        run: |
+          if [[ -z "$DEST_TAG" ]]; then
+            echo "No destination image to clean up"
+            exit 0
+          fi
+
+          echo "Deleting destination package versions with tag: $DEST_TAG"
+
+          gh api "/orgs/complytime/packages/container/ci-test-promote-dest/versions" \
+            --jq ".[] | select(.metadata.container.tags[] | . == \"$DEST_TAG\") | .id" | \
+          while read -r VERSION_ID; do
+            echo "Deleting version ID: $VERSION_ID"
+            gh api --method DELETE "/orgs/complytime/packages/container/ci-test-promote-dest/versions/$VERSION_ID" \
+              || echo "Failed to delete version $VERSION_ID"
+          done

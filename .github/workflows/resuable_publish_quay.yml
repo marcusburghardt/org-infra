@@ -1,5 +1,5 @@
 # Reusable Promote Image Workflow
-# Promotes images between registries with signature verification and attestation preservation.
+# Promotes images between registries with signature verification and fresh signing.
 
 name: Reusable Promote Image
 
@@ -7,47 +7,47 @@ name: Reusable Promote Image
   workflow_call:
     inputs:
       source_registry:
-        description: 'Source registry (e.g., ghcr.io)'
+        description: "Source registry (e.g., ghcr.io)"
         required: true
         type: string
       source_image:
-        description: 'Source image (e.g., org/image-name)'
+        description: "Source image (e.g., org/image-name)"
         required: true
         type: string
       source_tag:
-        description: 'Source tag (e.g., sha-abc123)'
+        description: "Source tag (e.g., sha-abc123)"
         required: true
         type: string
       dest_registry:
-        description: 'Destination registry (e.g., quay.io)'
+        description: "Destination registry (e.g., quay.io)"
         required: true
         type: string
       dest_image:
-        description: 'Destination image (e.g., org/image-name)'
+        description: "Destination image (e.g., org/image-name)"
         required: true
         type: string
       dest_tag:
-        description: 'Primary destination tag (e.g., v1.2.3)'
+        description: "Primary destination tag (e.g., v1.2.3)"
         required: true
         type: string
       additional_tags:
-        description: 'Comma-separated additional tags'
+        description: "Comma-separated additional tags"
         required: false
         type: string
       include_sha_tags:
-        description: 'Auto-add SHA tags (long + short) for immutability'
+        description: "Auto-add SHA tags (long + short) for immutability"
         type: boolean
         default: true
       verify_signature:
-        description: 'Verify signatures before and after promotion'
+        description: "Verify signatures before and after promotion"
         type: boolean
         default: true
       allowed_identity_regex:
-        description: 'Cosign certificate identity regex'
+        description: "Cosign certificate identity regex"
         required: false
         type: string
       fail_if_dest_exists:
-        description: 'Fail if destination tag exists (immutability)'
+        description: "Fail if destination tag exists (immutability)"
         type: boolean
         default: true
     secrets:
@@ -59,10 +59,10 @@ name: Reusable Promote Image
         required: true
     outputs:
       digest:
-        description: 'Promoted image digest'
+        description: "Promoted image digest"
         value: ${{ jobs.promote.outputs.digest }}
       image:
-        description: 'Full destination image (registry/name)'
+        description: "Full destination image (registry/name)"
         value: ${{ jobs.promote.outputs.image }}
 
 permissions:
@@ -79,6 +79,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       packages: read
+      id-token: write # OIDC token for keyless signing on destination
     outputs:
       digest: ${{ steps.resolve.outputs.digest }}
       image: ${{ inputs.dest_registry }}/${{ inputs.dest_image }}
@@ -144,7 +145,7 @@ jobs:
           INCLUDE_SHA_TAGS: ${{ inputs.include_sha_tags }}
           ADDITIONAL_TAGS: ${{ inputs.additional_tags }}
         run: |
-          cosign copy "${SOURCE_REF}@${DIGEST}" "${DEST_REF}:${DEST_TAG}"
+          crane copy "${SOURCE_REF}@${DIGEST}" "${DEST_REF}:${DEST_TAG}"
 
           # SHA tags for immutability (long + short)
           if [[ "$INCLUDE_SHA_TAGS" == "true" ]]; then
@@ -162,6 +163,13 @@ jobs:
               crane tag "${DEST_REF}@${DIGEST}" "${TAG// /}"
             done
           fi
+
+      - name: Sign destination image
+        env:
+          DIGEST: ${{ steps.resolve.outputs.digest }}
+        run: |
+          echo "Signing ${DEST_REF}@${DIGEST}"
+          cosign sign --yes "${DEST_REF}@${DIGEST}"
 
       - name: Verify destination signature
         if: ${{ inputs.verify_signature }}
