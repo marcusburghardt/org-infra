@@ -2,6 +2,10 @@ policies:
   - url: quay.io/complytime/policies-ampel-branch-protection@latest
     id: ampel-bp
 
+complypacks:
+  - url: ghcr.io/complytime/complypack-ampel-branch-protection@latest
+    id: ampel-bp-pack
+
 targets:
   - id: complytime-org-infra
     policies:
