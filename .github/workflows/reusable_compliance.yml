@@ -10,9 +10,10 @@ on:
   workflow_call:
     inputs:
       complytime_config_path:
-        description: 'Relative path of the complytime.yaml file in the calling repository'
-        required: true
+        description: 'Relative path of the complytime configuration file in the calling repository'
+        required: false
         type: string
+        default: '.complytime/complytime.yaml'
       policy_id:
         description: 'Policy ID to use for complyctl generate and scan commands'
         required: false
@@ -101,7 +102,9 @@ jobs:
           echo "CONFIG_PATH=${CONFIG_PATH}" >> "$GITHUB_ENV"
 
       - name: Copy workspace configuration
-        run: cp "_caller/${CONFIG_PATH}" complytime.yaml
+        run: |
+          mkdir -p .complytime
+          cp "_caller/${CONFIG_PATH}" .complytime/complytime.yaml
 
       - name: Copy ampel policy files
         # TEMPORARY: Manual staging until provider content is distributed
