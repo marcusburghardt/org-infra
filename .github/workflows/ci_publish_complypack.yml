@@ -128,6 +128,7 @@ jobs:
       dest_tag: ${{ github.event.release.tag_name }}
       allowed_identity_regex: https://github.com/complytime/org-infra(/.*)?
       fail_if_dest_exists: true
+      include_sha_tags: false
     secrets:
       dest_username: ${{ secrets.QUAY_USERNAME }}
       dest_password: ${{ secrets.QUAY_PASSWORD }}
