@@ -119,6 +119,7 @@ jobs:
     uses: ./.github/workflows/reusable_publish_quay.yml
     permissions:
       packages: read
+      id-token: write   # Required by reusable_publish_quay.yml for Sigstore keyless signing
     with:
       source_registry: ghcr.io
       source_image: complytime/complypack-ampel-branch-protection
