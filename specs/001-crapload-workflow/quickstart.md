@@ -52,7 +52,7 @@ go test -coverprofile=coverage.out $PACKAGES
 
 # 4. Generate baseline
 mkdir -p .gaze
-gaze report --format=json --coverprofile=coverage.out $PACKAGES | jq '.crap' > .gaze/baseline.json
+gaze crap --format=json --coverprofile=coverage.out $PACKAGES > .gaze/baseline.json
 
 # 5. Commit the baseline
 git add .gaze/baseline.json
@@ -70,7 +70,7 @@ To analyze only specific modules (e.g., exclude experimental packages), specify 
 go test -coverprofile=coverage.out ./cmd/... ./pkg/...
 
 # Generate baseline with the same packages
-gaze report --format=json --coverprofile=coverage.out ./cmd/... ./pkg/... | jq '.crap' > .gaze/baseline.json
+gaze crap --format=json --coverprofile=coverage.out ./cmd/... ./pkg/... > .gaze/baseline.json
 ```
 
 And configure the `packages` input in your workflow:
@@ -98,7 +98,6 @@ jobs:
     with:
       new-function-threshold: 20    # Stricter threshold
       packages: './cmd/... ./pkg/...'  # Specific packages only
-      post-comment: false            # Disable PR comments
 ```
 
 ## For org-infra Contributors

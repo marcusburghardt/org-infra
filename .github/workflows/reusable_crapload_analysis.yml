@@ -178,6 +178,27 @@ jobs:
           go test -coverprofile="${COVERPROFILE}" "${pkg_array[@]}" || \
             echo "::warning::Some tests failed; coverage data may be incomplete"
 
+      - name: Configure baseline settings
+        if: steps.no-changes.outputs.skip != 'true'
+        env:
+          EPSILON: ${{ inputs.regression-epsilon }}
+          NEW_FUNC_THRESHOLD: ${{ inputs.new-function-threshold }}
+        run: |
+          # Write .gaze.yaml from workflow inputs when the consumer
+          # repo does not already have one. This preserves backward
+          # compatibility for repos that set epsilon/threshold via
+          # workflow inputs rather than .gaze.yaml.
+          if [ ! -f .gaze.yaml ]; then
+            cat > .gaze.yaml <<EOF
+          baseline:
+            epsilon: ${EPSILON}
+            new_function_threshold: ${NEW_FUNC_THRESHOLD}
+          EOF
+            echo "Wrote .gaze.yaml from workflow inputs."
+          else
+            echo "Using existing .gaze.yaml from repository."
+          fi
+
       - name: Run Gaze analysis
         if: steps.no-changes.outputs.skip != 'true'
         id: gaze-analysis
@@ -186,7 +207,6 @@ jobs:
           COVERPROFILE: ${{ inputs.coverprofile }}
         run: |
           read -ra pkg_array <<< "$PKGS"
-          REPO_ROOT="$(pwd)/"
           gaze report \
             --format=json \
             --coverprofile="${COVERPROFILE}" \
@@ -194,27 +214,240 @@ jobs:
             > /tmp/gaze-report.json || true
           echo "Gaze analysis complete."
           cat /tmp/gaze-stderr.txt >&2 || true
-          # Extract CRAP data with path normalisation for baseline compatibility
-          jq --arg root "$REPO_ROOT" '.crap | (.scores[],.summary.worst_crap[]?,.summary.worst_gaze_crap[]?) |= (.file |= ltrimstr($root))' \
-            /tmp/gaze-report.json > /tmp/crapload-current.json || true
 
       - name: Compare against baseline
         if: steps.no-changes.outputs.skip != 'true'
         id: compare
         env:
           BASELINE: ${{ inputs.baseline-file }}
-          NEW_FUNC_THRESHOLD: ${{ inputs.new-function-threshold }}
-          EPSILON: ${{ inputs.regression-epsilon }}
+          PKGS: ${{ steps.resolve-packages.outputs.packages }}
+          COVERPROFILE: ${{ inputs.coverprofile }}
           GAZE_VERSION: ${{ inputs.gaze-version }}
         run: |
-          # Call external script to avoid actionlint hang on large inline bash blocks
-          bash .workflow-scripts/scripts/compare-crapload.sh \
-            "/tmp/crapload-current.json" \
-            "$BASELINE" \
-            "$NEW_FUNC_THRESHOLD" \
-            "$EPSILON" \
-            "$GAZE_VERSION" \
-            "/tmp/gaze-report.json" >> "$GITHUB_OUTPUT"
+          read -ra pkg_array <<< "$PKGS"
+
+          BASELINE_FLAG=""
+          HAS_BASELINE="false"
+          if [ -f "$BASELINE" ] && [ -s "$BASELINE" ]; then
+            BASELINE_FLAG="--baseline=${BASELINE}"
+            HAS_BASELINE="true"
+          fi
+
+          # Run gaze crap with baseline comparison (when available).
+          # gaze crap exits 1 on regression/violation — capture exit
+          # code but don't fail the step yet.
+          # shellcheck disable=SC2086
+          gaze crap \
+            --format=json \
+            --coverprofile="${COVERPROFILE}" \
+            ${BASELINE_FLAG} \
+            "${pkg_array[@]}" > /tmp/crapload-current.json 2>/tmp/gaze-crap-stderr.txt || true
+          cat /tmp/gaze-crap-stderr.txt >&2 || true
+
+          # Extract outputs from gaze crap JSON.
+          CRAPLOAD=$(jq -r '.summary.crapload // 0' /tmp/crapload-current.json)
+          GAZE_CRAPLOAD=$(jq -r '.summary.gaze_crapload // 0' /tmp/crapload-current.json)
+
+          if [ "$HAS_BASELINE" = "true" ]; then
+            PASSED=$(jq -r '.comparison.passed // true' /tmp/crapload-current.json)
+            REGRESSIONS=$(jq -r '.comparison.regressions // 0' /tmp/crapload-current.json)
+            IMPROVEMENTS=$(jq -r '.comparison.improvements // 0' /tmp/crapload-current.json)
+            if [ "$PASSED" = "true" ]; then
+              STATUS="pass"
+            else
+              STATUS="fail"
+            fi
+          else
+            REGRESSIONS=0
+            IMPROVEMENTS=0
+            STATUS="pass"
+          fi
+
+          {
+            echo "status=${STATUS}"
+            echo "crapload_count=${CRAPLOAD}"
+            echo "gaze_crapload_count=${GAZE_CRAPLOAD}"
+            echo "regressions_count=${REGRESSIONS}"
+            echo "improvements_count=${IMPROVEMENTS}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate PR comment
+        if: steps.no-changes.outputs.skip != 'true'
+        env:
+          BASELINE: ${{ inputs.baseline-file }}
+          GAZE_VERSION: ${{ inputs.gaze-version }}
+          STATUS: ${{ steps.compare.outputs.status }}
+        run: |
+          CRAP_JSON="/tmp/crapload-current.json"
+          REPORT_JSON="/tmp/gaze-report.json"
+
+          # Extract summary metrics from gaze crap JSON.
+          TOTAL_FUNCS=$(jq -r '.summary.total_functions // 0' "$CRAP_JSON")
+          AVG_COMPLEXITY=$(jq -r '(.summary.avg_complexity // 0) * 10 | round / 10' "$CRAP_JSON")
+          AVG_LINE_COV=$(jq -r '(.summary.avg_line_coverage // 0) * 10 | round / 10' "$CRAP_JSON")
+          AVG_CRAP=$(jq -r '(.summary.avg_crap // 0) * 10 | round / 10' "$CRAP_JSON")
+          CRAP_THRESH=$(jq -r '.summary.crap_threshold // 15' "$CRAP_JSON")
+          CRAPLOAD=$(jq -r '.summary.crapload // 0' "$CRAP_JSON")
+          AVG_CONTRACT_COV=$(jq -r '(.summary.avg_contract_coverage // 0) * 10 | round / 10' "$CRAP_JSON")
+          AVG_GAZE_CRAP=$(jq -r '(.summary.avg_gaze_crap // 0) * 10 | round / 10' "$CRAP_JSON")
+          GAZE_CRAP_THRESH=$(jq -r '.summary.gaze_crap_threshold // 15' "$CRAP_JSON")
+          GAZE_CRAPLOAD=$(jq -r '.summary.gaze_crapload // 0' "$CRAP_JSON")
+          REG_COUNT=$(jq -r '.comparison.regressions // 0' "$CRAP_JSON")
+          IMP_COUNT=$(jq -r '.comparison.improvements // 0' "$CRAP_JSON")
+          NEW_COUNT=$(jq -r '(.comparison.new_functions // 0) + (.comparison.new_violations // 0)' "$CRAP_JSON")
+
+          # No-baseline path: generate quickstart comment.
+          if [ ! -f "$BASELINE" ] || [ ! -s "$BASELINE" ]; then
+            cat > /tmp/crapload-comment-body.md <<EOF
+          <!-- crapload-analysis-marker -->
+          ## &#x2705; CRAP Load Analysis: PASS (no baseline)
+
+          No baseline file found at \`${BASELINE}\`. Showing current scores without regression detection.
+
+          ### How to Enable Regression Detection
+
+          Generate and commit a baseline file to track CRAP score changes over time:
+
+          \`\`\`bash
+          # 1. Install gaze
+          go install github.com/unbound-force/gaze/cmd/gaze@${GAZE_VERSION}
+
+          # 2. Run tests and generate baseline
+          go test -coverprofile=coverage.out ./...
+          mkdir -p .gaze
+          gaze crap --format=json --coverprofile=coverage.out ./... > .gaze/baseline.json
+
+          # 3. Commit the baseline
+          git add .gaze/baseline.json
+          git commit -m "chore: add CRAP baseline for regression detection"
+          \`\`\`
+
+          **For more information**:
+          - [Gaze README](https://github.com/unbound-force/gaze/blob/main/README.md)
+          - [CI Integration Guide](https://github.com/unbound-force/gaze/blob/main/docs/guides/ci-integration.md)
+
+          ### Summary
+
+          | Metric | Value |
+          |--------|-------|
+          | Functions analysed | ${TOTAL_FUNCS} |
+          | Avg complexity | ${AVG_COMPLEXITY} |
+          | Avg line coverage | ${AVG_LINE_COV}% |
+          | Avg CRAP score | ${AVG_CRAP} |
+          | CRAPload (>= ${CRAP_THRESH}) | ${CRAPLOAD} |
+          | Avg contract coverage | ${AVG_CONTRACT_COV}% |
+          | Avg GazeCRAP score | ${AVG_GAZE_CRAP} |
+          | GazeCRAPload (>= ${GAZE_CRAP_THRESH}) | ${GAZE_CRAPLOAD} |
+
+          [View full analysis logs](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          EOF
+            exit 0
+          fi
+
+          # Baseline path: generate full comparison comment.
+          STATUS_BADGE="&#x2705;"
+          STATUS_TEXT="PASS"
+          if [ "$STATUS" = "fail" ]; then
+            STATUS_BADGE="&#x274C;"
+            STATUS_TEXT="FAIL"
+          fi
+
+          cat > /tmp/crapload-comment-body.md <<EOF
+          <!-- crapload-analysis-marker -->
+          ## ${STATUS_BADGE} CRAP Load Analysis: ${STATUS_TEXT}
+
+          ### Summary
+
+          | Metric | Value |
+          |--------|-------|
+          | Functions analysed | ${TOTAL_FUNCS} |
+          | Avg complexity | ${AVG_COMPLEXITY} |
+          | Avg line coverage | ${AVG_LINE_COV}% |
+          | Avg CRAP score | ${AVG_CRAP} |
+          | CRAPload (>= ${CRAP_THRESH}) | ${CRAPLOAD} |
+          | Avg contract coverage | ${AVG_CONTRACT_COV}% |
+          | Avg GazeCRAP score | ${AVG_GAZE_CRAP} |
+          | GazeCRAPload (>= ${GAZE_CRAP_THRESH}) | ${GAZE_CRAPLOAD} |
+          | Regressions | ${REG_COUNT} |
+          | Improvements | ${IMP_COUNT} |
+          | New functions | ${NEW_COUNT} |
+          EOF
+
+          # Add quality metrics from gaze report if available.
+          QUALITY_COV=$(jq -r '(.quality.summary.average_contract_coverage // empty) * 10 | round / 10' "$REPORT_JSON" 2>/dev/null || true)
+          if [ -n "$QUALITY_COV" ]; then
+            QUALITY_OVERSPEC=$(jq -r '(.quality.summary.average_over_specification // 0) * 10 | round / 10' "$REPORT_JSON" 2>/dev/null || echo "0")
+            printf '| Avg contract coverage (quality) | %s%% |\n' "$QUALITY_COV" >> /tmp/crapload-comment-body.md
+            printf '| Avg over-specification | %s%% |\n' "$QUALITY_OVERSPEC" >> /tmp/crapload-comment-body.md
+          fi
+
+          # Add quadrant distribution from gaze report if available.
+          Q1=$(jq -r '.crap.summary.quadrant_counts.Q1_Safe // empty' "$REPORT_JSON" 2>/dev/null || true)
+          if [ -n "$Q1" ]; then
+            Q2=$(jq -r '.crap.summary.quadrant_counts.Q2_ComplexButTested // 0' "$REPORT_JSON" 2>/dev/null || echo "0")
+            Q3=$(jq -r '.crap.summary.quadrant_counts.Q3_SimpleButUnderspecified // 0' "$REPORT_JSON" 2>/dev/null || echo "0")
+            Q4=$(jq -r '.crap.summary.quadrant_counts.Q4_Dangerous // 0' "$REPORT_JSON" 2>/dev/null || echo "0")
+            cat >> /tmp/crapload-comment-body.md <<EOF
+
+          ### Quadrant Distribution
+
+          | Quadrant | Count |
+          |----------|-------|
+          | Q1 Safe | ${Q1} |
+          | Q2 Complex but Tested | ${Q2} |
+          | Q3 Simple but Underspecified | ${Q3} |
+          | Q4 Dangerous | ${Q4} |
+          EOF
+          fi
+
+          # Add regressions table from gaze crap comparison JSON.
+          REGRESSIONS_TABLE=$(jq -r '
+            [.scores[] | select(.status == "regression")] |
+            if length > 0 then
+              "\n### Regressions\n\n| Function | Baseline CRAP | Current CRAP | Delta | Baseline GazeCRAP | Current GazeCRAP | Delta |\n|----------|---------------|--------------|-------|-------------------|------------------|-------|\n" +
+              (map("| `\(.file):\(.function)` | \(.baseline_crap // "N/A") | \(.crap) | \(.crap_delta // "N/A") | \(.baseline_gaze_crap // "N/A") | \(.gaze_crap // "N/A") | \(.gaze_crap_delta // "N/A") |") | join("\n"))
+            else empty end
+          ' "$CRAP_JSON" 2>/dev/null || true)
+          if [ -n "$REGRESSIONS_TABLE" ]; then
+            printf '%s\n' "$REGRESSIONS_TABLE" >> /tmp/crapload-comment-body.md
+          fi
+
+          # Add improvements table.
+          IMPROVEMENTS_TABLE=$(jq -r '
+            [.scores[] | select(.status == "improvement")] |
+            if length > 0 then
+              "\n### Improvements\n\n| Function | Baseline CRAP | Current CRAP | Delta | Baseline GazeCRAP | Current GazeCRAP | Delta |\n|----------|---------------|--------------|-------|-------------------|------------------|-------|\n" +
+              (map("| `\(.file):\(.function)` | \(.baseline_crap // "N/A") | \(.crap) | \(.crap_delta // "N/A") | \(.baseline_gaze_crap // "N/A") | \(.gaze_crap // "N/A") | \(.gaze_crap_delta // "N/A") |") | join("\n"))
+            else empty end
+          ' "$CRAP_JSON" 2>/dev/null || true)
+          if [ -n "$IMPROVEMENTS_TABLE" ]; then
+            printf '%s\n' "$IMPROVEMENTS_TABLE" >> /tmp/crapload-comment-body.md
+          fi
+
+          # Add new functions table.
+          NEW_FUNCS_TABLE=$(jq -r '
+            .new_functions // [] |
+            if length > 0 then
+              "\n### New Functions\n\n| Status | Function | CRAP | GazeCRAP | Note |\n|--------|----------|------|----------|------|\n" +
+              (map(
+                (if .status == "new_violation" then "!+" else "+" end) as $icon |
+                "| \($icon) | `\(.file):\(.function)` | \(.crap) | \(.gaze_crap // "N/A") | \(.status | gsub("_"; " ")) |"
+              ) | join("\n"))
+            else empty end
+          ' "$CRAP_JSON" 2>/dev/null || true)
+          if [ -n "$NEW_FUNCS_TABLE" ]; then
+            printf '%s\n' "$NEW_FUNCS_TABLE" >> /tmp/crapload-comment-body.md
+          fi
+
+          # Add analysis warnings from gaze report if any.
+          FAILED_STEPS=$(jq -r '.errors | to_entries[] | select(.value != null) | "- **\(.key)**: \(.value)"' "$REPORT_JSON" 2>/dev/null || true)
+          if [ -n "$FAILED_STEPS" ]; then
+            printf '\n### Analysis Warnings\n\n%s\n' "$FAILED_STEPS" >> /tmp/crapload-comment-body.md
+          fi
+
+          # Add footer.
+          printf '\n[View full analysis logs](%s/%s/actions/runs/%s)\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> /tmp/crapload-comment-body.md
       - name: Write step summary
         if: github.event_name == 'pull_request'
         run: cat /tmp/crapload-comment-body.md >> "$GITHUB_STEP_SUMMARY"

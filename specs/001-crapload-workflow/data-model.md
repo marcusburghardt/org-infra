@@ -13,9 +13,8 @@ This feature does not introduce a traditional data model. The relevant data stru
 | baseline-file | string | no | `.gaze/baseline.json` | Path to committed baseline thresholds |
 | packages | string | no | `./...` | Go packages to analyze |
 | coverprofile | string | no | `coverage.out` | Path to coverage profile |
-| new-function-threshold | number | no | `30` | CRAP score ceiling for new functions |
-| regression-epsilon | number | no | `0.5` | Minimum score delta to flag a regression |
-| post-comment | boolean | no | `true` | Whether to post/update PR comment |
+| new-function-threshold | number | no | `30` | CRAP score ceiling for new functions (used when no `.gaze.yaml` exists) |
+| regression-epsilon | number | no | `0.5` | Minimum score delta to flag a regression (used when no `.gaze.yaml` exists) |
 
 ## Workflow Outputs
 
@@ -29,6 +28,5 @@ This feature does not introduce a traditional data model. The relevant data stru
 
 ## Intermediate Artifacts
 
-- **gaze-report.json**: Full Gaze analysis output (uploaded as artifact)
-- **crapload-current.json**: Extracted CRAP scores with normalized paths (uploaded as artifact)
-- **baseline-lookup.tsv**: Baseline scores keyed by `file:function` (ephemeral, not uploaded)
+- **gaze-report.json**: Full Gaze analysis output including quality metrics (uploaded as artifact)
+- **crapload-current.json**: `gaze crap` JSON output with scores and comparison data (uploaded as artifact)
