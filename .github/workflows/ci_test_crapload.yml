@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/ci_test_crapload.yml'
       - '.github/workflows/reusable_crapload_analysis.yml'
+      - 'scripts/generate-crapload-comment.sh'
       - 'scripts/resolve-go-packages.sh'
       - 'tests/test_crapload_package_resolution.py'
   push:
@@ -15,6 +16,7 @@ on:
     paths:
       - '.github/workflows/ci_test_crapload.yml'
       - '.github/workflows/reusable_crapload_analysis.yml'
+      - 'scripts/generate-crapload-comment.sh'
       - 'scripts/resolve-go-packages.sh'
       - 'tests/test_crapload_package_resolution.py'
 
