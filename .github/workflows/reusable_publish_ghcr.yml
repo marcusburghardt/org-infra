@@ -246,7 +246,7 @@ jobs:
             type=gha,scope=${{ inputs.component_name }}-main
           cache-to: type=gha,mode=max,scope=${{ inputs.component_name }}-${{ github.ref_name }}
           sbom: false
-          provenance: mode=max
+          provenance: false
           no-cache: ${{ inputs.force_rebuild }}
 
       - name: Export digest
