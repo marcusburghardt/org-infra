@@ -10,7 +10,7 @@ PyYAML==6.0.3
 requests==2.34.2
 
 # Testing
-pytest==9.1.0
+pytest==9.1.1
 
 # Linting
 ruff==0.15.18
