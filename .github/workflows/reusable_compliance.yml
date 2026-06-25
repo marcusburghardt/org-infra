@@ -42,12 +42,14 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: complytime/complyctl
+          ref: v1.0.0-beta.0
           persist-credentials: false
 
       - name: Checkout complytime-providers
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: complytime/complytime-providers
+          ref: v0.1.0
           path: _providers
           persist-credentials: false
 
