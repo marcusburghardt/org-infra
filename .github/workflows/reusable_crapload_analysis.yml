@@ -244,6 +244,17 @@ jobs:
             "${pkg_array[@]}" > /tmp/crapload-current.json 2>/tmp/gaze-crap-stderr.txt || true
           cat /tmp/gaze-crap-stderr.txt >&2 || true
 
+          # Guard: if gaze produced invalid JSON (e.g. unsupported
+          # flag), fail fast with a clear message instead of silently
+          # cascading to a false "fail" status downstream.
+          if ! jq -e '.summary' /tmp/crapload-current.json >/dev/null 2>&1; then
+            echo "::error::gaze crap produced invalid or empty JSON output."
+            echo "::error::This usually means the installed gaze version" \
+              "does not support a flag used by this workflow (e.g. --baseline)." \
+              "Upgrade gaze or pin gaze-version to a compatible release."
+            exit 1
+          fi
+
           # Extract outputs from gaze crap JSON.
           CRAPLOAD=$(jq -r '.summary.crapload // 0' /tmp/crapload-current.json)
           GAZE_CRAPLOAD=$(jq -r '.summary.gaze_crapload // 0' /tmp/crapload-current.json)
