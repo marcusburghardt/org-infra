@@ -90,16 +90,16 @@ on:
         required: false
     outputs:
       digest:
-        description: "Pushed image digest"
+        description: "Pushed image digest (empty when push=false)"
         value: ${{ jobs.push.outputs.digest }}
       image:
         description: "Full image name (ghcr.io/org/image)"
         value: ${{ jobs.push.outputs.image }}
       image_ref:
-        description: "Full image reference with tag (e.g., ghcr.io/org/image:sha-abc123 or ghcr.io/org/image:dev-sha-abc123)"
+        description: "Full image reference with tag (empty when push=false)"
         value: ${{ jobs.push.outputs.image_ref }}
       tags:
-        description: "Multi-line string with all applied tags"
+        description: "Multi-line string with all applied tags (empty when push=false)"
         value: ${{ jobs.push.outputs.tags }}
 
 permissions:
