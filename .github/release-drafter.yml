@@ -78,6 +78,7 @@ exclude-labels:
 exclude-contributors:
   - "github-actions[bot]"
   - "dependabot[bot]"
+  - "complytime-renovate[bot]"
 
 version-resolver:
   major:

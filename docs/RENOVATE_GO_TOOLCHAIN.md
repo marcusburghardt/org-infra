@@ -172,6 +172,26 @@ retention). Download from the GitHub Actions run page to inspect
 which repos were scanned, what updates were found, and what actions
 were taken.
 
+### Merge conflicts with Dependabot PRs
+
+Renovate runs `go mod tidy` and `go mod vendor` after bumping the
+toolchain version (`postUpdateOptions` in the preset). This
+regenerates `go.sum` and vendor contents. If a Dependabot PR
+modifying the same `go.sum` is open concurrently, the second PR to
+merge will encounter a merge conflict.
+
+Resolution options:
+
+- **Rebase the conflicting PR** manually or via the GitHub UI
+  "Update branch" button.
+- **Merge the smaller PR first** -- Renovate toolchain patches are
+  typically one-line `go.mod` changes and resolve cleanly after
+  rebase.
+
+This is a timing issue, not a functional conflict. Dependabot manages
+module dependencies; Renovate manages the toolchain directive. They
+do not overlap in scope.
+
 ## Further reading
 
 - [Renovate gomod manager](https://docs.renovatebot.com/modules/manager/gomod/)
