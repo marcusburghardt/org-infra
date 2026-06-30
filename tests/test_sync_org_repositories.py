@@ -912,3 +912,138 @@ class TestWorkflowRefTransformComposition:
             f"reusable_lint.yml@{TEST_SHA} # v1" in result
         )
         assert "some_input: value" in result
+
+
+class TestWriteStepSummary:
+    """Tests for write_step_summary."""
+
+    def test_writes_pr_table(self, tmp_path):
+        summary_file = tmp_path / "summary.md"
+        results = [
+            {
+                "repo": "complyctl",
+                "status": "created",
+                "pr_url": "https://github.com/complytime/complyctl/pull/1",
+                "error": None,
+            },
+            {
+                "repo": "complyscribe",
+                "status": "updated",
+                "pr_url": "https://github.com/complytime/complyscribe/pull/5",
+                "error": None,
+            },
+        ]
+        with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary_file)}):
+            sync_module.write_step_summary(results, "complytime", False)
+
+        content = summary_file.read_text()
+        assert "## Sync Organization Repositories" in content
+        assert "2/2" in content
+        assert "### Pull Requests" in content
+        assert "complyctl" in content
+        assert "Created" in content
+        assert "complyscribe" in content
+        assert "Updated" in content
+        assert "https://github.com/complytime/complyctl/pull/1" in content
+
+    def test_writes_failure_table(self, tmp_path):
+        summary_file = tmp_path / "summary.md"
+        results = [
+            {
+                "repo": "failing-repo",
+                "status": "failed",
+                "pr_url": None,
+                "error": "Git push rejected",
+            },
+        ]
+        with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary_file)}):
+            sync_module.write_step_summary(results, "complytime", False)
+
+        content = summary_file.read_text()
+        assert "0/1" in content
+        assert "### Failures" in content
+        assert "failing-repo" in content
+        assert "Git push rejected" in content
+
+    def test_writes_up_to_date(self, tmp_path):
+        summary_file = tmp_path / "summary.md"
+        results = [
+            {
+                "repo": "stable-repo",
+                "status": "up_to_date",
+                "pr_url": None,
+                "error": None,
+            },
+        ]
+        with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary_file)}):
+            sync_module.write_step_summary(results, "complytime", False)
+
+        content = summary_file.read_text()
+        assert "1/1" in content
+        assert "`stable-repo`" in content
+        assert "Up to date" in content
+
+    def test_writes_dry_run_repos(self, tmp_path):
+        summary_file = tmp_path / "summary.md"
+        results = [
+            {
+                "repo": "target-repo",
+                "status": "dry_run",
+                "pr_url": None,
+                "error": None,
+            },
+        ]
+        with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary_file)}):
+            sync_module.write_step_summary(results, "complytime", True)
+
+        content = summary_file.read_text()
+        assert "**Mode:** Dry run" in content
+        assert "`target-repo`" in content
+        assert "Would create PRs" in content
+
+    def test_skips_when_env_not_set(self, tmp_path):
+        results = [
+            {
+                "repo": "some-repo",
+                "status": "created",
+                "pr_url": "https://example.com/pr/1",
+                "error": None,
+            },
+        ]
+        with patch.dict("os.environ", {}, clear=True):
+            # Should not raise, just silently skip
+            sync_module.write_step_summary(results, "complytime", False)
+
+    def test_mixed_results(self, tmp_path):
+        summary_file = tmp_path / "summary.md"
+        results = [
+            {
+                "repo": "repo-a",
+                "status": "created",
+                "pr_url": "https://github.com/org/repo-a/pull/10",
+                "error": None,
+            },
+            {
+                "repo": "repo-b",
+                "status": "up_to_date",
+                "pr_url": None,
+                "error": None,
+            },
+            {
+                "repo": "repo-c",
+                "status": "failed",
+                "pr_url": None,
+                "error": "Permission denied",
+            },
+        ]
+        with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary_file)}):
+            sync_module.write_step_summary(results, "myorg", False)
+
+        content = summary_file.read_text()
+        assert "2/3" in content
+        assert "### Pull Requests" in content
+        assert "repo-a" in content
+        assert "`repo-b`" in content
+        assert "### Failures" in content
+        assert "repo-c" in content
+        assert "Permission denied" in content

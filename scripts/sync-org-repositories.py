@@ -524,7 +524,7 @@ def create_pull_request(
     title: str,
     body: str,
     base_branch: str = "main",
-) -> bool:
+) -> Optional[str]:
     """Create a pull request from a branch in the target repository.
 
     Args:
@@ -534,6 +534,9 @@ def create_pull_request(
         title: PR title
         body: PR body/description
         base_branch: Target branch (default: main)
+
+    Returns:
+        The PR URL on success, or None on failure.
     """
     data = {
         "title": title,
@@ -548,11 +551,11 @@ def create_pull_request(
     if status == 201:
         pr_url = response_data.get("html_url", "")
         print(f"Pull request created successfully: {pr_url}")
-        return True
+        return pr_url
     else:
         error_msg = response_data.get("message", "Unknown error")
         print(f"Failed to create PR (HTTP {status}): {error_msg}")
-        return False
+        return None
 
 
 def generate_dependabot_config(repo_name: str, config: dict) -> Optional[List[dict]]:
@@ -659,7 +662,7 @@ def sync_repository(
     dry_run: bool = False,
     release_tag: Optional[str] = None,
     release_sha: Optional[str] = None,
-) -> bool:
+) -> Dict[str, Optional[str]]:
     """Sync a single repository with standard files using direct push.
 
     Args:
@@ -669,6 +672,12 @@ def sync_repository(
         dry_run: If True, only show what would be done
         release_tag: Release tag for workflow ref transformation
         release_sha: Commit SHA for workflow ref pinning
+
+    Returns:
+        A dict with keys:
+        - status: "created" | "updated" | "up_to_date" | "dry_run" | "failed"
+        - pr_url: The PR URL (for created/updated), or None
+        - error: Error message on failure, or None
     """
     print(f"\n{'=' * 60}")
     print(f"Processing: {org}/{repo_name}")
@@ -699,22 +708,24 @@ def sync_repository(
                 # If the API check failed, abort to avoid creating
                 # duplicate PRs on transient failures.
                 if existing_pr and "error" in existing_pr:
-                    print(
-                        f"Error: Cannot verify existing PRs for "
+                    err = (
+                        f"Cannot verify existing PRs for "
                         f"{repo_name}: {existing_pr['error']}. "
                         f"Skipping to avoid duplicates."
                     )
-                    return False
+                    print(f"Error: {err}")
+                    return {"status": "failed", "pr_url": None, "error": err}
 
                 if existing_pr and existing_pr.get("branch"):
                     pr_branch = existing_pr["branch"]
                     if not validate_branch_name(pr_branch):
-                        print(
-                            f"Error: Existing PR branch '{pr_branch}' "
+                        err = (
+                            f"Existing PR branch '{pr_branch}' "
                             f"does not match prefix "
                             f"'{SYNC_BRANCH_PREFIX}'"
                         )
-                        return False
+                        print(f"Error: {err}")
+                        return {"status": "failed", "pr_url": None, "error": err}
 
                     print(
                         f"Open sync PR exists: {existing_pr['url']}"
@@ -725,8 +736,9 @@ def sync_repository(
                         repo.git.fetch("origin", pr_branch)
                         repo.git.checkout("-B", pr_branch, f"origin/{pr_branch}")
                     except GitCommandError as e:
-                        print(f"Failed to checkout PR branch: {e}")
-                        return False
+                        err = f"Failed to checkout PR branch: {e}"
+                        print(err)
+                        return {"status": "failed", "pr_url": None, "error": err}
 
             # Step 3: Process static files to sync
             files_changed: List[str] = []
@@ -880,11 +892,11 @@ def sync_repository(
 
             if not files_changed:
                 print(f"All files up to date for {repo_name}")
-                return True
+                return {"status": "up_to_date", "pr_url": None, "error": None}
 
             if dry_run:
                 print(f"[DRY RUN] Would create PR with {len(files_changed)} file(s)")
-                return True
+                return {"status": "dry_run", "pr_url": None, "error": None}
 
             # Step 5: Commit and push
             commit_message = "chore: sync repository standards\n\nUpdated files:\n" + "\n".join(
@@ -900,16 +912,25 @@ def sync_repository(
 
                 if not repo.is_dirty(index=True):
                     print("PR branch already up to date")
-                    return True
+                    return {
+                        "status": "up_to_date",
+                        "pr_url": existing_pr.get("url"),
+                        "error": None,
+                    }
 
                 repo.index.commit(commit_message)
                 try:
                     repo.git.push("origin", pr_branch)
                     print(f"Updated PR branch: {pr_branch}")
                 except GitCommandError as e:
-                    print(f"Failed to push to PR branch: {e}")
-                    return False
-                return True
+                    err = f"Failed to push to PR branch: {e}"
+                    print(err)
+                    return {"status": "failed", "pr_url": None, "error": err}
+                return {
+                    "status": "updated",
+                    "pr_url": existing_pr.get("url"),
+                    "error": None,
+                }
 
             # Step 6: Create new branch, commit, push, and open PR
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -917,7 +938,11 @@ def sync_repository(
 
             print("\nCreating branch and committing changes...")
             if not create_branch_and_commit(repo_path, branch_name, files_changed, commit_message):
-                return False
+                return {
+                    "status": "failed",
+                    "pr_url": None,
+                    "error": "Failed to create branch and commit",
+                }
 
             pr_body = (
                 "This PR synchronizes repository standards from "
@@ -932,7 +957,7 @@ def sync_repository(
             )
 
             print("Creating pull request...")
-            return create_pull_request(
+            pr_url = create_pull_request(
                 org,
                 repo_name,
                 branch_name,
@@ -940,15 +965,113 @@ def sync_repository(
                 pr_body,
                 base_branch,
             )
+            if pr_url:
+                return {"status": "created", "pr_url": pr_url, "error": None}
+            return {
+                "status": "failed",
+                "pr_url": None,
+                "error": "Failed to create pull request",
+            }
         except subprocess.CalledProcessError as e:
-            print(f"Error processing {repo_name}: {e}")
-            return False
+            err = f"Error processing {repo_name}: {e}"
+            print(err)
+            return {"status": "failed", "pr_url": None, "error": err}
         except Exception as e:
-            print(f"Unexpected error processing {repo_name}: {e}")
+            err = f"Unexpected error processing {repo_name}: {e}"
+            print(err)
             import traceback
 
             traceback.print_exc()
-            return False
+            return {"status": "failed", "pr_url": None, "error": err}
+
+
+def write_step_summary(
+    results: List[Dict[str, Optional[str]]],
+    org: str,
+    dry_run: bool,
+) -> None:
+    """Write a Markdown summary to GITHUB_STEP_SUMMARY.
+
+    Produces a table of per-repo outcomes with PR links when
+    running inside GitHub Actions.  Falls back to stdout when
+    the environment variable is not set (local runs).
+    """
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+
+    success_count = sum(
+        1 for r in results if r["status"] != "failed"
+    )
+    total = len(results)
+
+    lines: List[str] = []
+    lines.append("## Sync Organization Repositories")
+    lines.append("")
+    lines.append(f"**Organization:** {org}")
+    if dry_run:
+        lines.append("**Mode:** Dry run")
+    lines.append(
+        f"**Result:** {success_count}/{total} "
+        f"repositories processed successfully"
+    )
+    lines.append("")
+
+    # PR activity table (created or updated)
+    pr_rows = [
+        r for r in results
+        if r["status"] in ("created", "updated") and r.get("pr_url")
+    ]
+    if pr_rows:
+        lines.append("### Pull Requests")
+        lines.append("")
+        lines.append("| Repository | Action | PR |")
+        lines.append("|:-----------|:-------|:---|")
+        for r in pr_rows:
+            action = (
+                "Created" if r["status"] == "created"
+                else "Updated"
+            )
+            pr_link = r["pr_url"]
+            lines.append(f"| {r['repo']} | {action} | {pr_link} |")
+        lines.append("")
+
+    # Up-to-date repos
+    up_to_date = [
+        r for r in results if r["status"] == "up_to_date"
+    ]
+    if up_to_date:
+        names = ", ".join(f"`{r['repo']}`" for r in up_to_date)
+        lines.append(f"**Up to date:** {names}")
+        lines.append("")
+
+    # Dry-run repos
+    dry_run_repos = [
+        r for r in results if r["status"] == "dry_run"
+    ]
+    if dry_run_repos:
+        names = ", ".join(
+            f"`{r['repo']}`" for r in dry_run_repos
+        )
+        lines.append(
+            f"**Would create PRs:** {names}"
+        )
+        lines.append("")
+
+    # Failures
+    failed = [r for r in results if r["status"] == "failed"]
+    if failed:
+        lines.append("### Failures")
+        lines.append("")
+        lines.append("| Repository | Error |")
+        lines.append("|:-----------|:------|")
+        for r in failed:
+            error = r.get("error") or "Unknown error"
+            lines.append(f"| {r['repo']} | {error} |")
+        lines.append("")
+
+    with open(summary_path, "a") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def main() -> None:
@@ -1041,24 +1164,39 @@ def main() -> None:
     print(f"{len(excluded_repos)} repositories were excluded in this sync:\n- {excluded_list}")
     print(f"\nWill process {len(repositories)} repository(ies)")
 
-    success_count = 0
+    results: List[Dict[str, Optional[str]]] = []
     for repo_name in repositories:
         try:
-            if sync_repository(
+            result = sync_repository(
                 args.org, repo_name, config, args.dry_run,
                 release_tag=release_tag,
                 release_sha=release_sha,
-            ):
-                success_count += 1
+            )
+            result["repo"] = repo_name
+            results.append(result)
         except Exception as e:
             print(f"Failed to process {repo_name}: {e}")
             import traceback
 
             traceback.print_exc()
+            results.append({
+                "repo": repo_name,
+                "status": "failed",
+                "pr_url": None,
+                "error": str(e),
+            })
 
+    success_count = sum(
+        1 for r in results if r["status"] != "failed"
+    )
     print(f"\n{'=' * 60}")
-    print(f"Summary: Successfully processed {success_count}/{len(repositories)} repositories")
+    print(
+        f"Summary: Successfully processed "
+        f"{success_count}/{len(repositories)} repositories"
+    )
     print(f"{'=' * 60}")
+
+    write_step_summary(results, args.org, args.dry_run)
 
 
 if __name__ == "__main__":

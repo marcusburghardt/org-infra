@@ -94,27 +94,6 @@ jobs:
           fi
           python scripts/sync-org-repositories.py "${ARGS[@]}"
 
-      - name: Summary
-        if: always()
-        env:
-          REPOS: ${{ github.event.inputs.repos }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
-        run: |
-          {
-            echo "## Sync Organization Repositories Complete"
-            echo "- **Organization:** ${{ github.repository_owner }}"
-            echo "- **Trigger:** ${{ github.event_name }}"
-
-            if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-              echo "- **Dry Run:** $DRY_RUN"
-              if [ -n "$REPOS" ]; then
-                echo "- **Repositories:** $REPOS"
-              else
-                echo "- **Repositories:** All (from peribolos.yml)"
-              fi
-            fi
-            echo ""
-            echo "### Workflow Details"
-            echo "- Uses direct push to create sync branches in target repos"
-            echo "- PRs created from sync branch to main (requires review)"
-          } >> "$GITHUB_STEP_SUMMARY"
+      # The sync script writes a detailed Markdown summary
+      # (including PR links and per-repo status) directly to
+      # GITHUB_STEP_SUMMARY.  No additional summary step needed.
