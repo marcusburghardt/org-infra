@@ -23,7 +23,7 @@ on:
 
 # Minimal permissions for the workflow GITHUB_TOKEN.
 # The GitHub App token (generated below) carries its own permissions
-# (contents:write, pull_requests:write) scoped to target repos.
+# (contents:write, pull_requests:write, workflows:write) scoped to target repos.
 # Note: the sync script also clones the org's .github repository
 # (for peribolos.yaml) using the App token, not this GITHUB_TOKEN.
 permissions:
@@ -51,6 +51,7 @@ jobs:
           owner: ${{ github.repository_owner }} # zizmor: ignore[github-app]
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
