@@ -1,0 +1,451 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reusable Release Preflight Workflow
+# ====================================
+# Validates a semver tag before publishing a release. Designed to run as
+# the first job in a release pipeline, gating downstream jobs on its outputs.
+#
+# Checks performed:
+#   1. Tag format validation (strict semver, optional pre-release suffixes)
+#   2. Tag uniqueness (with smart re-run detection for idempotent pipelines)
+#   3. Semver ordering (new tag > latest existing tag per semver 2.0.0)
+#   4. CI check verification (auto-discovered or explicitly listed)
+#   5. Unreleased commit verification (at least one commit since last tag)
+#   6. Tag creation and push (annotated tag via GitHub API)
+#
+# Outputs:
+#   - tag:         The validated tag string
+#   - tag_created: Whether a new tag was created (true/false)
+#
+# Usage:
+#   jobs:
+#     preflight:
+#       uses: complytime/org-infra/.github/workflows/reusable_release_preflight.yml@main
+#       with:
+#         tag: v1.2.3
+#     release:
+#       needs: preflight
+#       if: needs.preflight.outputs.tag != ''
+#       ...
+
+name: Reusable Release Preflight
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Semver tag to release (e.g., v1.2.3)'
+        required: true
+        type: string
+      allow_prerelease:
+        description: 'Accept pre-release suffixes (e.g., v1.0.0-beta.0)'
+        required: false
+        type: boolean
+        default: false
+      ci_checks:
+        description: 'JSON array of CI check names to verify. Empty = auto-discover from workflow files.'
+        required: false
+        type: string
+        default: ''
+      default_branch:
+        description: 'Default branch name for CI context'
+        required: false
+        type: string
+        default: 'main'
+    outputs:
+      tag:
+        description: 'Validated tag string'
+        value: ${{ jobs.preflight.outputs.tag }}
+      tag_created:
+        description: 'Whether a new tag was created (true/false)'
+        value: ${{ jobs.preflight.outputs.tag_created }}
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: Release Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write  # Create and push tags
+      checks: read     # Query CI check run results
+
+    concurrency:
+      group: release-${{ github.repository }}
+      cancel-in-progress: false
+
+    outputs:
+      tag: ${{ steps.set_outputs.outputs.tag }}
+      tag_created: ${{ steps.set_outputs.outputs.tag_created }}
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate default_branch input
+        id: validate_branch
+        env:
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+        run: |
+          if [[ "$DEFAULT_BRANCH" =~ ^- ]]; then
+            echo "::error::default_branch must not start with a hyphen: $DEFAULT_BRANCH"
+            exit 1
+          fi
+          if [[ ! "$DEFAULT_BRANCH" =~ ^[a-zA-Z0-9/_-]+$ ]]; then
+            echo "::error::default_branch contains invalid characters: $DEFAULT_BRANCH"
+            echo "::error::Allowed: [a-zA-Z0-9/_-]"
+            exit 1
+          fi
+          echo "::notice::default_branch validated: $DEFAULT_BRANCH"
+
+      - name: Validate tag format
+        id: validate_tag
+        env:
+          ALLOW_PRERELEASE: ${{ inputs.allow_prerelease }}
+        run: |
+          if [[ "$ALLOW_PRERELEASE" == "true" ]]; then
+            # Semver with optional pre-release suffix (no build metadata)
+            PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          else
+            # Strict semver: vMAJOR.MINOR.PATCH only
+            PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ $PATTERN ]]; then
+            echo "::error::Tag '$RELEASE_TAG' does not match semver format"
+            if [[ "$ALLOW_PRERELEASE" == "true" ]]; then
+              echo "::error::Expected: vMAJOR.MINOR.PATCH[-PRERELEASE]"
+            else
+              echo "::error::Expected: vMAJOR.MINOR.PATCH"
+            fi
+            exit 1
+          fi
+
+          # Reject build metadata (+ suffix) regardless of mode
+          if [[ "$RELEASE_TAG" == *"+"* ]]; then
+            echo "::error::Build metadata (+) is not allowed in release tags"
+            exit 1
+          fi
+
+          echo "::notice::Tag format validated: $RELEASE_TAG"
+
+      - name: Check tag uniqueness
+        id: check_tag
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+          # Check if tag already exists on remote
+          REMOTE_REF=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG" | awk '{print $1}')
+
+          if [[ -z "$REMOTE_REF" ]]; then
+            echo "::notice::Tag $RELEASE_TAG does not exist — will create"
+            echo "tag_exists_at_head=false" >> "$GITHUB_OUTPUT"
+            echo "is_rerun=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Tag exists — dereference annotated tags to get the commit SHA
+          # git ls-remote with ^{} suffix resolves annotated tags to their target
+          DEREF_SHA=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG^{}" \
+            | awk '{print $1}')
+
+          # If no dereferenced entry, tag is lightweight — use REMOTE_REF directly
+          TAG_COMMIT="${DEREF_SHA:-$REMOTE_REF}"
+
+          if [[ "$TAG_COMMIT" == "$HEAD_SHA" ]]; then
+            echo "::notice::Tag $RELEASE_TAG already exists at HEAD ($HEAD_SHA) — re-run detected"
+            echo "tag_exists_at_head=true" >> "$GITHUB_OUTPUT"
+            echo "is_rerun=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Tag $RELEASE_TAG already exists at commit $TAG_COMMIT"
+            echo "::error::HEAD is $HEAD_SHA — refusing to move an existing tag"
+            exit 1
+          fi
+
+      - name: Verify semver ordering
+        if: steps.check_tag.outputs.tag_exists_at_head != 'true'
+        id: verify_ordering
+        run: |
+          # Get the latest existing semver tag
+          LATEST_TAG=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
+
+          if [[ -z "$LATEST_TAG" ]]; then
+            echo "::notice::No existing semver tags found — first release"
+            exit 0
+          fi
+
+          echo "::notice::Latest existing tag: $LATEST_TAG"
+          echo "::notice::New tag: $RELEASE_TAG"
+
+          # Strip leading 'v' for comparison
+          LATEST_VER="${LATEST_TAG#v}"
+          NEW_VER="${RELEASE_TAG#v}"
+
+          # Check if either version has a pre-release suffix
+          if [[ "$LATEST_VER" != *"-"* && "$NEW_VER" != *"-"* ]]; then
+            # Both are release versions — use sort -V for simple comparison
+            SORTED=$(printf '%s\n%s\n' "$LATEST_VER" "$NEW_VER" | sort -V | tail -1)
+            if [[ "$SORTED" == "$LATEST_VER" ]]; then
+              echo "::error::New tag $RELEASE_TAG is not greater than $LATEST_TAG"
+              exit 1
+            fi
+            echo "::notice::Semver ordering verified: $LATEST_TAG < $RELEASE_TAG"
+          else
+            # One or both have pre-release — use Python semver 2.0.0 comparison
+            python3 << PYEOF
+          import sys
+
+          def parse_semver(v):
+              """Parse semver string into (major, minor, patch, pre_ids)."""
+              if '-' in v:
+                  core, pre = v.split('-', 1)
+              else:
+                  core, pre = v, None
+              major, minor, patch = (int(x) for x in core.split('.'))
+              if pre is None:
+                  return (major, minor, patch, None)
+              ids = []
+              for ident in pre.split('.'):
+                  ids.append(int(ident) if ident.isdigit() else ident)
+              return (major, minor, patch, ids)
+
+          def cmp_semver(a, b):
+              """Compare two semver tuples per semver 2.0.0 section 11."""
+              for i in range(3):
+                  if a[i] != b[i]:
+                      return -1 if a[i] < b[i] else 1
+              if a[3] is None and b[3] is None:
+                  return 0
+              if a[3] is None:
+                  return 1
+              if b[3] is None:
+                  return -1
+              for x, y in zip(a[3], b[3]):
+                  if type(x) == type(y):
+                      if x != y:
+                          return -1 if x < y else 1
+                  else:
+                      return -1 if isinstance(x, int) else 1
+              if len(a[3]) != len(b[3]):
+                  return -1 if len(a[3]) < len(b[3]) else 1
+              return 0
+
+          latest = parse_semver('$LATEST_VER')
+          new = parse_semver('$NEW_VER')
+          if cmp_semver(latest, new) >= 0:
+              print('::error::New tag $RELEASE_TAG is not greater than $LATEST_TAG')
+              sys.exit(1)
+          print('::notice::Semver ordering verified: $LATEST_TAG < $RELEASE_TAG')
+          PYEOF
+          fi
+
+      - name: Discover CI checks
+        id: discover_checks
+        env:
+          CI_CHECKS_INPUT: ${{ inputs.ci_checks }}
+        run: |
+          REQUIRED_CHECKS=()
+          SECURITY_GATE="false"
+
+          if [[ -n "$CI_CHECKS_INPUT" ]]; then
+            # Validate JSON array format
+            if ! echo "$CI_CHECKS_INPUT" | jq -e 'type == "array"' > /dev/null 2>&1; then
+              echo "::error::ci_checks input is not a valid JSON array"
+              exit 1
+            fi
+
+            # Validate all elements are non-empty strings
+            INVALID=$(echo "$CI_CHECKS_INPUT" | jq -r \
+              '.[] | select(type != "string" or length == 0) | "invalid"' | head -1)
+            if [[ -n "$INVALID" ]]; then
+              echo "::error::ci_checks contains non-string or empty elements"
+              exit 1
+            fi
+
+            # Read validated checks into array
+            while IFS= read -r check; do
+              REQUIRED_CHECKS+=("$check")
+            done < <(echo "$CI_CHECKS_INPUT" | jq -r '.[]')
+
+            echo "::notice::Using explicitly provided CI checks (${#REQUIRED_CHECKS[@]} checks)"
+          else
+            # Auto-discover from workflow files
+            echo "::notice::Auto-discovering CI checks from workflow files"
+
+            if [[ -f ".github/workflows/ci_checks.yml" ]]; then
+              REQUIRED_CHECKS+=("CI / Standardized CI / Run linters")
+              echo "::notice::Discovered ci_checks.yml — added linter check"
+            fi
+
+            if [[ -f ".github/workflows/ci_security.yml" ]]; then
+              SECURITY_GATE="true"
+              echo "::notice::Discovered ci_security.yml — security gate enabled"
+            fi
+
+            if [[ -f ".github/workflows/ci_local.yml" ]]; then
+              if command -v yq > /dev/null 2>&1; then
+                WORKFLOW_NAME=$(yq '.name' .github/workflows/ci_local.yml)
+                if [[ -n "$WORKFLOW_NAME" && "$WORKFLOW_NAME" != "null" ]]; then
+                  while IFS= read -r key; do
+                    JOB_NAME=$(yq ".jobs.${key}.name // \"${key}\"" \
+                      .github/workflows/ci_local.yml)
+                    REQUIRED_CHECKS+=("${WORKFLOW_NAME} / ${JOB_NAME}")
+                    echo "::notice::Discovered ci_local job: ${WORKFLOW_NAME} / ${JOB_NAME}"
+                  done < <(yq '.jobs | keys | .[]' .github/workflows/ci_local.yml)
+                fi
+              else
+                echo "::warning::yq not found — skipping ci_local.yml check discovery"
+              fi
+            fi
+
+            if [[ ${#REQUIRED_CHECKS[@]} -eq 0 ]]; then
+              echo "::warning::No CI checks discovered from workflow files"
+            fi
+          fi
+
+          # Output discovered checks as JSON array
+          CHECKS_JSON=$(printf '%s\n' "${REQUIRED_CHECKS[@]}" | jq -R . | jq -s .)
+          echo "required_checks=$CHECKS_JSON" >> "$GITHUB_OUTPUT"
+          echo "security_gate=$SECURITY_GATE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Required checks: $CHECKS_JSON"
+          echo "::notice::Security gate: $SECURITY_GATE"
+
+      - name: Verify CI checks passed on HEAD
+        id: verify_ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.check_tag.outputs.head_sha }}
+          REQUIRED_CHECKS: ${{ steps.discover_checks.outputs.required_checks }}
+          SECURITY_GATE: ${{ steps.discover_checks.outputs.security_gate }}
+        run: |
+          FAILED=0
+
+          # Fetch all check runs for HEAD (paginated)
+          API_RESPONSE=$(gh api "repos/${GH_REPO}/commits/${HEAD_SHA}/check-runs" \
+            --paginate 2>&1) || {
+            echo "::error::GitHub API call failed: $API_RESPONSE"
+            exit 1
+          }
+
+          # Verify each required check
+          CHECK_COUNT=$(echo "$REQUIRED_CHECKS" | jq -r 'length')
+          for i in $(seq 0 $((CHECK_COUNT - 1))); do
+            CHECK_NAME=$(echo "$REQUIRED_CHECKS" | jq -r ".[$i]")
+
+            STATUS=$(echo "$API_RESPONSE" | jq -r \
+              ".check_runs[] | select(.name == \"${CHECK_NAME}\") | .conclusion" \
+              | head -1)
+
+            if [[ -z "$STATUS" ]]; then
+              echo "::error::Check '$CHECK_NAME' not found for commit $HEAD_SHA"
+              FAILED=1
+            elif [[ "$STATUS" != "success" ]]; then
+              echo "::error::Check '$CHECK_NAME' has conclusion: $STATUS (expected: success)"
+              FAILED=1
+            else
+              echo "::notice::Check '$CHECK_NAME' passed"
+            fi
+          done
+
+          # Security gate: verify at least one OSV-Scanner check passed
+          if [[ "$SECURITY_GATE" == "true" ]]; then
+            OSV_STATUS=$(echo "$API_RESPONSE" | jq -r \
+              '[.check_runs[]
+                | select(.name | test("Security Checks / OSV-Scanner /"))
+                | .conclusion] | if length > 0 then
+                  if any(. == "success") then "success" else "failure" end
+                else "missing" end')
+
+            case "$OSV_STATUS" in
+              success)
+                echo "::notice::Security gate passed — OSV-Scanner check succeeded"
+                ;;
+              failure)
+                echo "::error::Security gate failed — no OSV-Scanner check succeeded"
+                FAILED=1
+                ;;
+              missing)
+                echo "::error::Security gate failed — no OSV-Scanner checks found"
+                FAILED=1
+                ;;
+            esac
+          fi
+
+          if [[ "$FAILED" -ne 0 ]]; then
+            echo "::error::One or more CI checks failed — aborting release"
+            exit 1
+          fi
+
+          echo "::notice::All CI checks passed for commit $HEAD_SHA"
+
+      - name: Verify unreleased commits
+        if: steps.check_tag.outputs.is_rerun != 'true'
+        id: verify_commits
+        run: |
+          LATEST_TAG=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
+
+          if [[ -z "$LATEST_TAG" ]]; then
+            echo "::notice::No previous tags — all commits are unreleased"
+            exit 0
+          fi
+
+          COMMIT_COUNT=$(git rev-list "${LATEST_TAG}..HEAD" --count)
+
+          if [[ "$COMMIT_COUNT" -eq 0 ]]; then
+            echo "::error::No commits since $LATEST_TAG — nothing to release"
+            exit 1
+          fi
+
+          echo "::notice::Found $COMMIT_COUNT unreleased commit(s) since $LATEST_TAG"
+
+      - name: Create and push tag
+        id: create_tag
+        if: steps.check_tag.outputs.tag_exists_at_head != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Configure git identity for annotated tag
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Create annotated tag locally
+          git tag -a "$RELEASE_TAG" -m "$RELEASE_TAG"
+
+          # Push tag via GitHub API (no stored credentials needed)
+          HEAD_SHA=$(git rev-parse HEAD)
+          gh api "repos/${GH_REPO}/git/refs" \
+            -f ref="refs/tags/${RELEASE_TAG}" \
+            -f sha="$HEAD_SHA" || {
+            echo "::error::Failed to push tag $RELEASE_TAG via GitHub API"
+            exit 1
+          }
+
+          echo "::notice::Created and pushed tag $RELEASE_TAG at $HEAD_SHA"
+
+      - name: Set outputs
+        id: set_outputs
+        env:
+          TAG_EXISTS_AT_HEAD: ${{ steps.check_tag.outputs.tag_exists_at_head }}
+        run: |
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          if [[ "$TAG_EXISTS_AT_HEAD" == "true" ]]; then
+            echo "tag_created=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Re-run — tag already existed at HEAD"
+          else
+            echo "tag_created=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::New tag created"
+          fi
