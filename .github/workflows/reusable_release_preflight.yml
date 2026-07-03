@@ -192,6 +192,13 @@ jobs:
           LATEST_VER="${LATEST_TAG#v}"
           NEW_VER="${RELEASE_TAG#v}"
 
+          # Validate LATEST_VER against semver pattern before comparison
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "$LATEST_VER" =~ $SEMVER_RE ]]; then
+            echo "::error::Latest tag $LATEST_TAG does not match semver format"
+            exit 1
+          fi
+
           # Check if either version has a pre-release suffix
           if [[ "$LATEST_VER" != *"-"* && "$NEW_VER" != *"-"* ]]; then
             # Both are release versions — use sort -V for simple comparison
@@ -203,11 +210,11 @@ jobs:
             echo "::notice::Semver ordering verified: $LATEST_TAG < $RELEASE_TAG"
           else
             # One or both have pre-release — use Python semver 2.0.0 comparison
-            python3 << PYEOF
+            # Pass versions as CLI args to avoid shell interpolation in Python source
+            python3 -c "
           import sys
 
           def parse_semver(v):
-              """Parse semver string into (major, minor, patch, pre_ids)."""
               if '-' in v:
                   core, pre = v.split('-', 1)
               else:
@@ -221,7 +228,6 @@ jobs:
               return (major, minor, patch, ids)
 
           def cmp_semver(a, b):
-              """Compare two semver tuples per semver 2.0.0 section 11."""
               for i in range(3):
                   if a[i] != b[i]:
                       return -1 if a[i] < b[i] else 1
@@ -232,7 +238,7 @@ jobs:
               if b[3] is None:
                   return -1
               for x, y in zip(a[3], b[3]):
-                  if type(x) == type(y):
+                  if type(x) is type(y):
                       if x != y:
                           return -1 if x < y else 1
                   else:
@@ -241,13 +247,14 @@ jobs:
                   return -1 if len(a[3]) < len(b[3]) else 1
               return 0
 
-          latest = parse_semver('$LATEST_VER')
-          new = parse_semver('$NEW_VER')
-          if cmp_semver(latest, new) >= 0:
-              print('::error::New tag $RELEASE_TAG is not greater than $LATEST_TAG')
-              sys.exit(1)
-          print('::notice::Semver ordering verified: $LATEST_TAG < $RELEASE_TAG')
-          PYEOF
+          latest = parse_semver(sys.argv[1])
+          new = parse_semver(sys.argv[2])
+          sys.exit(0 if cmp_semver(latest, new) < 0 else 1)
+          " "$LATEST_VER" "$NEW_VER" || {
+              echo "::error::New tag $RELEASE_TAG is not greater than $LATEST_TAG"
+              exit 1
+            }
+            echo "::notice::Semver ordering verified: $LATEST_TAG < $RELEASE_TAG"
           fi
 
       - name: Discover CI checks
@@ -344,8 +351,8 @@ jobs:
           for i in $(seq 0 $((CHECK_COUNT - 1))); do
             CHECK_NAME=$(echo "$REQUIRED_CHECKS" | jq -r ".[$i]")
 
-            STATUS=$(echo "$API_RESPONSE" | jq -r \
-              ".check_runs[] | select(.name == \"${CHECK_NAME}\") | .conclusion" \
+            STATUS=$(echo "$API_RESPONSE" | jq -r --arg name "$CHECK_NAME" \
+              '.check_runs[] | select(.name == $name) | .conclusion' \
               | head -1)
 
             if [[ -z "$STATUS" ]]; then
@@ -421,15 +428,25 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Create annotated tag locally
-          git tag -a "$RELEASE_TAG" -m "$RELEASE_TAG"
-
-          # Push tag via GitHub API (no stored credentials needed)
+          # Create annotated tag object via GitHub API
           HEAD_SHA=$(git rev-parse HEAD)
+          TAG_OBJECT_SHA=$(gh api "repos/${GH_REPO}/git/tags" \
+            -f tag="$RELEASE_TAG" \
+            -f message="$RELEASE_TAG" \
+            -f object="$HEAD_SHA" \
+            -f type="commit" \
+            -F "tagger[name]=github-actions[bot]" \
+            -F "tagger[email]=41898282+github-actions[bot]@users.noreply.github.com" \
+            --jq '.sha') || {
+            echo "::error::Failed to create tag object $RELEASE_TAG via GitHub API"
+            exit 1
+          }
+
+          # Create ref pointing at the tag object (preserves annotated tag)
           gh api "repos/${GH_REPO}/git/refs" \
             -f ref="refs/tags/${RELEASE_TAG}" \
-            -f sha="$HEAD_SHA" || {
-            echo "::error::Failed to push tag $RELEASE_TAG via GitHub API"
+            -f sha="$TAG_OBJECT_SHA" || {
+            echo "::error::Failed to create tag ref $RELEASE_TAG via GitHub API"
             exit 1
           }
 
