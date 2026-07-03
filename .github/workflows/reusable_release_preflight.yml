@@ -272,6 +272,12 @@ jobs:
               exit 1
             fi
 
+            # Reject empty array
+            if [[ $(echo "$CI_CHECKS_INPUT" | jq 'length') -eq 0 ]]; then
+              echo "::error::ci_checks input is an empty array — at least one check name is required"
+              exit 1
+            fi
+
             # Validate all elements are non-empty strings
             INVALID=$(echo "$CI_CHECKS_INPUT" | jq -r \
               '.[] | select(type != "string" or length == 0) | "invalid"' | head -1)
