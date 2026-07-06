@@ -68,10 +68,14 @@ jobs:
           RENOVATE_REPORT_PATH: /tmp/renovate-report.json
 
       - name: Generate job summary
-        if: always() && hashFiles('/tmp/renovate-report.json') != ''
+        if: always()
         shell: bash
         run: |
           REPORT="/tmp/renovate-report.json"
+          if [ ! -f "$REPORT" ]; then
+            echo "No Renovate report found; skipping summary."
+            exit 0
+          fi
           DRY_RUN="${{ inputs.dry_run }}"
 
           {
