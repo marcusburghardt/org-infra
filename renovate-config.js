@@ -6,12 +6,8 @@ module.exports = {
   platform: 'github',
   onboarding: false,
   requireConfig: 'optional',
-  repositories: [
-    'complytime/complyctl',
-    'complytime/complytime',
-    'complytime/complytime-providers',
-    'complytime/complytime-collector-components',
-  ],
+  autodiscover: true,
+  autodiscoverFilter: ['complytime/*'],
   globalExtends: [
     'github>complytime/org-infra:go-toolchain-patches',
   ],
