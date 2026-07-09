@@ -36,7 +36,7 @@ on:
   workflow_call:
     inputs:
       component_name:
-        description: "Component name (e.g., compass, beacon-distro)"
+        description: "Component name (e.g., proofwatch, beacon-distro)"
         required: true
         type: string
       containerfile_path:

@@ -76,11 +76,9 @@
     patch-only filtering).
   - PR metadata shows conventional commit prefix and
     `dependencies` label (covers: PR metadata scenario).
-- [ ] 5.5 Verify multi-module support: confirm the dry-run output
-  from task 5.4 shows Renovate discovering `go.mod` files in
-  `complytime-collector-components/proofwatch/` and
-  `complytime-collector-components/truthbeam/` subdirectories
-  independently.
+- [ ] 5.5 Verify single-module discovery: confirm the dry-run output
+  from task 5.4 shows Renovate discovering the `go.mod` file in
+  `complytime-collector-components/proofwatch/` subdirectory.
 - [ ] 5.6 Create a test fixture for live validation: a minimal
   repo (or fork) with an outdated `toolchain` directive in
   `go.mod`. Create two variants:
