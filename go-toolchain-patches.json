@@ -10,9 +10,9 @@
       "enabled": false
     },
     {
-      "description": "Re-enable Go toolchain for version lookup",
+      "description": "Re-enable Go version directives for patch updates",
       "matchManagers": ["gomod"],
-      "matchDepTypes": ["toolchain"],
+      "matchDepTypes": ["golang", "toolchain"],
       "enabled": true,
       "separateMinorPatch": true,
       "automerge": false,
@@ -20,9 +20,9 @@
       "commitMessagePrefix": "chore(deps):"
     },
     {
-      "description": "Suppress non-patch toolchain updates (minor/major)",
+      "description": "Suppress non-patch Go version updates (minor/major)",
       "matchManagers": ["gomod"],
-      "matchDepTypes": ["toolchain"],
+      "matchDepTypes": ["golang", "toolchain"],
       "matchUpdateTypes": ["minor", "major"],
       "enabled": false
     }
