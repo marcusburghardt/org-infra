@@ -14,7 +14,7 @@
 # - Layer 3: Tag isolation (dev-sha-* and dev-* tags for unprotected refs)
 #
 # Tag Formats:
-# - Protected refs:   sha-<commit>, <branch> (e.g., sha-abc123, main)
+# - Protected refs:   sha-<commit>, <branch>, <tag> (e.g., sha-abc123, main, v1.2.3)
 # - Unprotected refs: dev-sha-<commit>, dev-<branch> (e.g., dev-sha-abc123, dev-feat-xyz)
 #
 # Attestations (SLSA provenance + SBOM):
@@ -261,6 +261,23 @@ jobs:
             org.opencontainers.image.title=${{ inputs.component_name }}
             org.opencontainers.image.description=${{ inputs.image_description || inputs.component_name }}
             ${{ inputs.image_vendor && format('org.opencontainers.image.vendor={0}', inputs.image_vendor) || '' }}
+
+      - name: Assert version tag for tag events
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          if echo "$TAGS" | grep -qF ":${GIT_TAG}"; then
+            echo "::notice::✓ Version tag :${GIT_TAG} present in metadata output"
+          else
+            echo "::error::Version tag :${GIT_TAG} missing from metadata output"
+            echo "::error::Expected one of the generated tags to end with :${GIT_TAG}"
+            echo "::error::Generated tags:"
+            echo "$TAGS" | while read -r t; do echo "::error::  $t"; done
+            echo "::error::This usually means type=ref,event=tag was dropped from the metadata-action config"
+            exit 1
+          fi
 
       - name: Build and push
         id: build
