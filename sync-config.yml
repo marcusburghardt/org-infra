@@ -114,6 +114,12 @@ files_to_sync:
       - .github
       - community
 
+  # Community Health Files
+  - source: SECURITY.md
+    destination: SECURITY.md
+    exclude_repos:
+      - community
+
   # GitHub Templates
   - source: .github/pull_request_template.md
     destination: .github/pull_request_template.md

@@ -479,6 +479,59 @@ class TestLoadSyncConfig:
         assert len(dependabot["common"]) > 0
 
 
+class TestSecurityMdSync:
+    """Tests for SECURITY.md sync configuration and content."""
+
+    def test_security_md_entry_exists_in_files_to_sync(self):
+        config = sync_module.load_sync_config("sync-config.yml")
+        sources = [
+            f["source"] for f in config["files_to_sync"]
+        ]
+        assert "SECURITY.md" in sources
+
+    def test_security_md_entry_has_matching_destination(self):
+        config = sync_module.load_sync_config("sync-config.yml")
+        entry = next(
+            (
+                f
+                for f in config["files_to_sync"]
+                if f["source"] == "SECURITY.md"
+            ),
+            None,
+        )
+        assert entry is not None, (
+            "SECURITY.md entry missing from files_to_sync"
+        )
+        assert entry.get("destination", entry["source"]) == "SECURITY.md"
+
+    def test_security_md_excludes_community(self):
+        config = sync_module.load_sync_config("sync-config.yml")
+        entry = next(
+            (
+                f
+                for f in config["files_to_sync"]
+                if f["source"] == "SECURITY.md"
+            ),
+            None,
+        )
+        assert entry is not None, (
+            "SECURITY.md entry missing from files_to_sync"
+        )
+        assert "community" in entry.get("exclude_repos", [])
+
+    def test_security_md_contains_contact_email(self):
+        content = Path("SECURITY.md").read_text()
+        assert "complytime-security@redhat.com" in content
+
+    def test_security_md_contains_public_issue_warning(self):
+        content = Path("SECURITY.md").read_text()
+        assert "do not open a public github issue" in content.lower()
+
+    def test_security_md_contains_community_link(self):
+        content = Path("SECURITY.md").read_text()
+        assert "community/blob/main/SECURITY.md" in content
+
+
 class TestExtractRepositories:
     """Tests for extract_repositories."""
 

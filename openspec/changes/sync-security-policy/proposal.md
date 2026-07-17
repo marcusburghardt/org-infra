@@ -11,7 +11,8 @@ compliance.
 
 ## What Changes
 
-- Fix the security contact email in `community/SECURITY.md` from
+- **Prerequisite** (separate change in `community` repo): Fix the security
+  contact email in `community/SECURITY.md` from
   `complytime-security@example.com` to `complytime-security@redhat.com`.
 - Refine the `org-infra/SECURITY.md` stub template to include the security
   contact email directly (for OSPS-VM-02.01 compliance in each repo) while
@@ -41,7 +42,11 @@ compliance.
 
 ### Modified Capabilities
 
-<!-- No existing capability specs are changing at the requirement level. -->
+_None -- no existing capability specs are changing at the requirement level._
+
+### Removed Capabilities
+
+_None._
 
 ## Impact
 
@@ -56,3 +61,6 @@ compliance.
 - **complyctl**: Currently has a custom `SECURITY.md` with the correct email.
   The sync will replace it with the org-wide stub. This is intentional since the
   canonical policy lives in `community`.
+- **Documentation**: No updates to `AGENTS.md` or `README.md` are required.
+  The sync mechanism is already documented and directory listings use catch-all
+  patterns. A `CHANGELOG.md` entry will be added.
