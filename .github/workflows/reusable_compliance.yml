@@ -78,9 +78,13 @@ jobs:
 
       - name: Install snappy
         uses: carabiner-dev/actions/install/snappy@2a4b2cd115ede14629b03ef7e77586d3269d4c72
+        with:
+          install-dir: ${{ env.HOME }}/.carabiner
 
       - name: Install ampel
         uses: carabiner-dev/actions/install/ampel@2a4b2cd115ede14629b03ef7e77586d3269d4c72
+        with:
+          install-dir: ${{ env.HOME }}/.carabiner
 
       - name: Register ampel provider with complyctl
         run: |
