@@ -520,19 +520,27 @@ class TestSecurityMdSync:
         assert "community" in entry.get("exclude_repos", [])
 
     def test_security_md_contains_contact_email(self):
-        content = Path("SECURITY.md").read_text()
+        content = (
+            Path(__file__).parent.parent / "SECURITY.md"
+        ).read_text()
         assert "complytime-security@redhat.com" in content
 
     def test_security_md_contains_public_issue_warning(self):
-        content = Path("SECURITY.md").read_text()
+        content = (
+            Path(__file__).parent.parent / "SECURITY.md"
+        ).read_text()
         assert "do not open a public github issue" in content.lower()
 
     def test_security_md_contains_ghpvr_instructions(self):
-        content = Path("SECURITY.md").read_text()
+        content = (
+            Path(__file__).parent.parent / "SECURITY.md"
+        ).read_text()
         assert "private vulnerability reporting" in content.lower()
 
     def test_security_md_contains_community_link(self):
-        content = Path("SECURITY.md").read_text()
+        content = (
+            Path(__file__).parent.parent / "SECURITY.md"
+        ).read_text()
         assert "community/blob/main/SECURITY.md" in content
 
 
