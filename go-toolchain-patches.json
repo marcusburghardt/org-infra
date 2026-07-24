@@ -14,6 +14,7 @@
       "matchManagers": ["gomod"],
       "matchDepNames": ["go"],
       "enabled": true,
+      "rangeStrategy": "bump",
       "separateMinorPatch": true,
       "automerge": false,
       "labels": ["dependencies"],
