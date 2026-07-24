@@ -39,6 +39,9 @@ jobs:
     permissions:
       contents: read
 
+    env:
+      CARABINER_INSTALL_DIR: /home/runner/.carabiner
+
     steps:
       - name: Checkout complyctl source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,12 +82,12 @@ jobs:
       - name: Install snappy
         uses: carabiner-dev/actions/install/snappy@2a4b2cd115ede14629b03ef7e77586d3269d4c72
         with:
-          install-dir: ${{ env.HOME }}/.carabiner
+          install-dir: ${{ env.CARABINER_INSTALL_DIR }}
 
       - name: Install ampel
         uses: carabiner-dev/actions/install/ampel@2a4b2cd115ede14629b03ef7e77586d3269d4c72
         with:
-          install-dir: ${{ env.HOME }}/.carabiner
+          install-dir: ${{ env.CARABINER_INSTALL_DIR }}
 
       - name: Register ampel provider with complyctl
         run: |
