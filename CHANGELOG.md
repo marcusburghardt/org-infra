@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Project board review-status advance**: The Compliance Automation
+  planning board sync moves items from Ready for Review to In Review when
+  a non-author human comments or submits a PR review after the Status
+  change. See `docs/PROJECT_BOARD_SYNC.md`.
+
 - **Epic issue template**: Added `.github/ISSUE_TEMPLATE/epic.yml` for
   parent issues that group a set of user stories. Size and sprint live
   on the child stories, not the epic. Synced to org repos via

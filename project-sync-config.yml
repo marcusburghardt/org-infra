@@ -9,6 +9,11 @@ project:
   number: 14
   # Status option applied to newly added items (must match a Status field option)
   default_status: "Backlog"
+  # When an item in Ready for Review gets a non-author comment or a submitted
+  # PR review, move it to In Review. Values are prefixes of Status options
+  # (board names include emojis: "Ready for Review  👀", "In Review 🏁").
+  ready_for_review_status: "Ready for Review"
+  in_review_status: "In Review"
   # Organization is set automatically from the source GitHub org (see
   # OWNER_TO_ORGANIZATION in scripts/sync-project-board.py). Options must
   # match the project Organization field: Agentic-SSDLC, complytime, unbound-force.
