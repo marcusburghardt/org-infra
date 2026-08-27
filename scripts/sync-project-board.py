@@ -55,6 +55,9 @@ DEFAULT_IN_REVIEW_STATUS = "In Review"
 
 # How many recent comments/reviews to inspect per Ready for Review item.
 REVIEW_ACTIVITY_PAGE_SIZE = 30
+# GitHub nodes(ids:) accepts at most 100 IDs; keep batches smaller so
+# comments(last:) + reviews(last:) stay within query complexity limits.
+REVIEW_ACTIVITY_BATCH_SIZE = 50
 
 # Submitted review states. PENDING is an unsubmitted draft and is ignored.
 COUNTABLE_REVIEW_STATES = frozenset(
@@ -866,49 +869,96 @@ def list_board_status_items(
     return _paginate_project_item_nodes(client, project_id, query)
 
 
-def fetch_content_review_activity(
-    client: GitHubClient, content_id: str
-) -> Dict[str, Any]:
-    """Return comments (and PR reviews) for one issue or pull request."""
-    data = client.graphql(
-        f"""
-        query($id: ID!) {{
-          node(id: $id) {{
-            __typename
-            ... on Issue {{
-              author {{ login }}
-              comments(last: {REVIEW_ACTIVITY_PAGE_SIZE}) {{
-                nodes {{
-                  createdAt
-                  author {{ login }}
-                  authorAssociation
-                }}
-              }}
-            }}
-            ... on PullRequest {{
-              author {{ login }}
-              comments(last: {REVIEW_ACTIVITY_PAGE_SIZE}) {{
-                nodes {{
-                  createdAt
-                  author {{ login }}
-                  authorAssociation
-                }}
-              }}
-              reviews(last: {REVIEW_ACTIVITY_PAGE_SIZE}) {{
-                nodes {{
-                  submittedAt
-                  state
-                  author {{ login }}
-                  authorAssociation
-                }}
-              }}
-            }}
-          }}
-        }}
-        """,
-        {"id": content_id},
-    )
-    return data.get("node") or {}
+def _batched(values: List[str], size: int) -> List[List[str]]:
+    """Split values into consecutive chunks of at most size."""
+    if size < 1:
+        raise ValueError(f"batch size must be >= 1, got {size}")
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+def fetch_contents_review_activity(
+    client: GitHubClient, content_ids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Return comments (and PR reviews) keyed by issue/PR node id."""
+    if not content_ids:
+        return {}
+    query = """
+    query($ids: [ID!]!, $pageSize: Int!) {
+      nodes(ids: $ids) {
+        __typename
+        ... on Issue {
+          id
+          author { login }
+          comments(last: $pageSize) {
+            nodes {
+              createdAt
+              author { login }
+              authorAssociation
+            }
+          }
+        }
+        ... on PullRequest {
+          id
+          author { login }
+          comments(last: $pageSize) {
+            nodes {
+              createdAt
+              author { login }
+              authorAssociation
+            }
+          }
+          reviews(last: $pageSize) {
+            nodes {
+              submittedAt
+              state
+              author { login }
+              authorAssociation
+            }
+          }
+        }
+      }
+    }
+    """
+    found: Dict[str, Dict[str, Any]] = {}
+    for chunk in _batched(content_ids, REVIEW_ACTIVITY_BATCH_SIZE):
+        data = client.graphql(
+            query,
+            {"ids": chunk, "pageSize": REVIEW_ACTIVITY_PAGE_SIZE},
+        )
+        for node in data.get("nodes") or []:
+            if not node:
+                continue
+            node_id = node.get("id")
+            if node_id:
+                found[node_id] = node
+    return found
+
+
+def _ready_for_review_candidates(
+    nodes: List[Dict[str, Any]], ready_name: str
+) -> List[Tuple[str, str, Dict[str, Any], datetime]]:
+    """Collect Ready for Review items with a parseable Status.updatedAt.
+
+    Status.updatedAt is when this item's Status option last changed (not
+    other project-item metadata). That is the since-boundary so comments
+    from before the move into Ready for Review do not bounce the item
+    into In Review.
+    """
+    candidates: List[Tuple[str, str, Dict[str, Any], datetime]] = []
+    for node in nodes:
+        status = node.get("status") or {}
+        if (status.get("name") or "") != ready_name:
+            continue
+        since = parse_github_datetime(status.get("updatedAt"))
+        if since is None:
+            continue
+        content = node.get("content") or {}
+        content_id = content.get("id")
+        item_id = node.get("id")
+        if not content_id or not item_id:
+            continue
+        candidates.append((content_id, item_id, content, since))
+    return candidates
 
 
 def advance_ready_for_review(
@@ -944,21 +994,27 @@ def advance_ready_for_review(
         f"\n=== Advancing {ready_name} -> {in_review_name} "
         "on reviewer activity ==="
     )
-    for node in list_board_status_items(client, fields.project_id):
-        status = node.get("status") or {}
-        if (status.get("name") or "") != ready_name:
-            continue
-        since = parse_github_datetime(status.get("updatedAt"))
-        if since is None:
-            continue
-        content = node.get("content") or {}
-        content_id = content.get("id")
-        item_id = node.get("id")
-        if not content_id or not item_id:
-            continue
+    candidates = _ready_for_review_candidates(
+        list_board_status_items(client, fields.project_id), ready_name
+    )
+    if not candidates:
+        return
+    try:
+        content_ids = [content_id for content_id, _, _, _ in candidates]
+        activities = fetch_contents_review_activity(client, content_ids)
+    except SYNC_EXCEPTIONS as exc:
+        for _content_id, _item_id, content, _since in candidates:
+            stats.review_status_failed += 1
+            label = item_content_label(content)
+            msg = f"Failed advancing {label} to {in_review_name}: {exc}"
+            print(f"  ! {msg}")
+            stats.errors.append(msg)
+        return
+
+    for content_id, item_id, content, since in candidates:
         label = item_content_label(content)
         try:
-            activity = fetch_content_review_activity(client, content_id)
+            activity = activities.get(content_id) or {}
             if not content_has_reviewer_activity(activity, since):
                 continue
             set_single_select(

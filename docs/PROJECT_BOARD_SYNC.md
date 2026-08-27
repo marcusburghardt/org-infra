@@ -41,9 +41,11 @@ delayed under GitHub load:
    the PR are left alone.
 7. Moves items in **Ready for Review** to **In Review** when a non-author
    human comments on the issue/PR, or submits a PR review, at or after the
-   Status last changed. Author comments, bots (`[bot]`, `authorAssociation:
-   BOT`), and unsubmitted (`PENDING`) reviews are ignored. Detected on the
-   same 5-minute tick as the rest of the sync.
+   Status last changed. The since-boundary is the Status field's `updatedAt`
+   (when this item's Status option last changed, not other board metadata).
+   Author comments, bots (`[bot]`, `authorAssociation: BOT`), and
+   unsubmitted (`PENDING`) reviews are ignored. Detected on the same
+   5-minute tick as the rest of the sync.
 
 The workflow lives only in `org-infra` (it is **not** synced out to consumer repos).
 A new PR is picked up on the next 5-minute tick (GitHub does not let this

@@ -1387,6 +1387,14 @@ class TestReviewerActivityDetection:
         assert sync.content_has_reviewer_activity(content, self._since()) is False
 
 
+def _issue_activity(*comments: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "__typename": "Issue",
+        "author": {"login": "alice"},
+        "comments": {"nodes": list(comments)},
+    }
+
+
 class TestAdvanceReadyForReview:
     def test_moves_issue_after_reviewer_comment(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1399,11 +1407,9 @@ class TestAdvanceReadyForReview:
         )
         monkeypatch.setattr(
             sync,
-            "fetch_content_review_activity",
+            "fetch_contents_review_activity",
             lambda *_a, **_k: {
-                "__typename": "Issue",
-                "author": {"login": "alice"},
-                "comments": {"nodes": [_comment("bob", ACTIVITY_AFTER)]},
+                "I_1": _issue_activity(_comment("bob", ACTIVITY_AFTER)),
             },
         )
         set_mock = MagicMock()
@@ -1415,6 +1421,33 @@ class TestAdvanceReadyForReview:
         )
         assert stats.review_status_set == 1
         assert stats.review_status_failed == 0
+
+    def test_dry_run_calls_set_single_select_and_counts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=True)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [_ready_board_item()],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            lambda *_a, **_k: {
+                "I_1": _issue_activity(_comment("bob", ACTIVITY_AFTER)),
+            },
+        )
+        real_set = sync.set_single_select
+        set_spy = MagicMock(side_effect=real_set)
+        monkeypatch.setattr(sync, "set_single_select", set_spy)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_spy.assert_called_once_with(
+            client, "PROJECT", "PVTI_1", "STATUS_FIELD", "ST_IN_REVIEW"
+        )
+        assert stats.review_status_set == 1
+        client.graphql.assert_not_called()
 
     def test_moves_pr_after_submitted_review(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1433,14 +1466,16 @@ class TestAdvanceReadyForReview:
         )
         monkeypatch.setattr(
             sync,
-            "fetch_content_review_activity",
+            "fetch_contents_review_activity",
             lambda *_a, **_k: {
-                "__typename": "PullRequest",
-                "author": {"login": "alice"},
-                "comments": {"nodes": []},
-                "reviews": {
-                    "nodes": [_review("bob", ACTIVITY_AFTER, "APPROVED")],
-                },
+                "PR_1": {
+                    "__typename": "PullRequest",
+                    "author": {"login": "alice"},
+                    "comments": {"nodes": []},
+                    "reviews": {
+                        "nodes": [_review("bob", ACTIVITY_AFTER, "APPROVED")],
+                    },
+                }
             },
         )
         set_mock = MagicMock()
@@ -1461,11 +1496,9 @@ class TestAdvanceReadyForReview:
         )
         monkeypatch.setattr(
             sync,
-            "fetch_content_review_activity",
+            "fetch_contents_review_activity",
             lambda *_a, **_k: {
-                "__typename": "Issue",
-                "author": {"login": "alice"},
-                "comments": {"nodes": [_comment("alice", ACTIVITY_AFTER)]},
+                "I_1": _issue_activity(_comment("alice", ACTIVITY_AFTER)),
             },
         )
         set_mock = MagicMock()
@@ -1489,7 +1522,7 @@ class TestAdvanceReadyForReview:
             ],
         )
         fetch_mock = MagicMock()
-        monkeypatch.setattr(sync, "fetch_content_review_activity", fetch_mock)
+        monkeypatch.setattr(sync, "fetch_contents_review_activity", fetch_mock)
         set_mock = MagicMock()
         monkeypatch.setattr(sync, "set_single_select", set_mock)
         stats = sync.SyncStats()
@@ -1519,11 +1552,9 @@ class TestAdvanceReadyForReview:
         )
         monkeypatch.setattr(
             sync,
-            "fetch_content_review_activity",
+            "fetch_contents_review_activity",
             lambda *_a, **_k: {
-                "__typename": "Issue",
-                "author": {"login": "alice"},
-                "comments": {"nodes": [_comment("bob", ACTIVITY_AFTER)]},
+                "I_1": _issue_activity(_comment("bob", ACTIVITY_AFTER)),
             },
         )
         monkeypatch.setattr(
@@ -1537,13 +1568,106 @@ class TestAdvanceReadyForReview:
         assert stats.review_status_failed == 1
         assert any("Failed advancing" in err for err in stats.errors)
 
-    def test_fetch_query_requests_configured_page_size(self):
+    def test_records_batch_fetch_failure(self, monkeypatch: pytest.MonkeyPatch):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [
+                _ready_board_item(item_id="PVTI_1", content_id="I_1"),
+                _ready_board_item(item_id="PVTI_2", content_id="I_2", number=2),
+            ],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            MagicMock(side_effect=RuntimeError("GraphQL errors")),
+        )
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_mock.assert_not_called()
+        assert stats.review_status_set == 0
+        assert stats.review_status_failed == 2
+        assert len(stats.errors) == 2
+
+    def test_fetches_ready_items_in_one_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [
+                _ready_board_item(item_id="PVTI_1", content_id="I_1", number=1),
+                _ready_board_item(item_id="PVTI_2", content_id="I_2", number=2),
+            ],
+        )
+        client.graphql.return_value = {
+            "nodes": [
+                {
+                    "id": "I_1",
+                    **_issue_activity(_comment("bob", ACTIVITY_AFTER)),
+                },
+                {
+                    "id": "I_2",
+                    **_issue_activity(),
+                },
+            ]
+        }
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        client.graphql.assert_called_once()
+        query, variables = client.graphql.call_args.args
+        assert "$pageSize: Int!" in query
+        assert "last: $pageSize" in query
+        assert "reviews(last: $pageSize)" in query
+        assert variables == {
+            "ids": ["I_1", "I_2"],
+            "pageSize": sync.REVIEW_ACTIVITY_PAGE_SIZE,
+        }
+        set_mock.assert_called_once_with(
+            client, "PROJECT", "PVTI_1", "STATUS_FIELD", "ST_IN_REVIEW"
+        )
+        assert stats.review_status_set == 1
+
+    def test_fetch_query_passes_page_size_as_variable(self):
         client = MagicMock()
-        client.graphql.return_value = {"node": {"__typename": "Issue"}}
-        sync.fetch_content_review_activity(client, "I_1")
-        query = client.graphql.call_args.args[0]
-        assert f"last: {sync.REVIEW_ACTIVITY_PAGE_SIZE}" in query
-        assert "reviews(last:" in query
+        client.graphql.return_value = {"nodes": [{"id": "I_1"}]}
+        result = sync.fetch_contents_review_activity(client, ["I_1"])
+        query, variables = client.graphql.call_args.args
+        assert "$ids: [ID!]!" in query
+        assert "$pageSize: Int!" in query
+        assert "last: $pageSize" in query
+        assert "reviews(last: $pageSize)" in query
+        assert variables["ids"] == ["I_1"]
+        assert variables["pageSize"] == sync.REVIEW_ACTIVITY_PAGE_SIZE
+        assert result == {"I_1": {"id": "I_1"}}
+
+    def test_fetch_skips_graphql_when_ids_empty(self):
+        client = MagicMock()
+        assert sync.fetch_contents_review_activity(client, []) == {}
+        client.graphql.assert_not_called()
+
+    def test_fetch_splits_into_configured_batches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(sync, "REVIEW_ACTIVITY_BATCH_SIZE", 2)
+        client = MagicMock()
+        client.graphql.side_effect = [
+            {"nodes": [{"id": "I_1"}, {"id": "I_2"}]},
+            {"nodes": [None, {"id": "I_3"}]},
+        ]
+        result = sync.fetch_contents_review_activity(
+            client, ["I_1", "I_2", "I_3"]
+        )
+        assert client.graphql.call_count == 2
+        assert client.graphql.call_args_list[0].args[1]["ids"] == ["I_1", "I_2"]
+        assert client.graphql.call_args_list[1].args[1]["ids"] == ["I_3"]
+        assert set(result) == {"I_1", "I_2", "I_3"}
 
     def test_sync_passes_configured_status_prefixes(
         self, monkeypatch: pytest.MonkeyPatch
