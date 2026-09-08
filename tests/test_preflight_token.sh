@@ -80,7 +80,7 @@ fi
 # 4.3 Assert no other step references secrets.tag_push_token (negative test)
 # ---------------------------------------------------------------------------
 
-OTHER_STEPS=$(yq '.jobs.preflight.steps[] | select(.name != "Create and push tag") | .. | select(tag == "!!str")' "$WORKFLOW_PATH" |
+OTHER_STEPS=$(yq '.jobs.preflight.steps[] | select(.name != "Create and push tag") | .. | select(type == "string")' "$WORKFLOW_PATH" |
 	grep -c 'tag_push_token' || true)
 
 if [[ "$OTHER_STEPS" -eq 0 ]]; then
@@ -95,7 +95,7 @@ fi
 
 EXPECTED_DESC="Optional elevated token for tag creation. When provided, the tag event can trigger downstream workflows. WARNING: Do not use an elevated token in downstream workflows that re-invoke this preflight workflow, or you will create a recursive loop."
 
-DESC_BLOCK=$(yq '.on.workflow_call.secrets.tag_push_token.description' "$WORKFLOW_PATH")
+DESC_BLOCK=$(yq -r '.on.workflow_call.secrets.tag_push_token.description' "$WORKFLOW_PATH")
 
 if [[ "$DESC_BLOCK" == "$EXPECTED_DESC" ]]; then
 	pass "4.4 description contains exact warning text"

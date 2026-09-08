@@ -49,6 +49,7 @@ jobs:
       actions: read
       security-events: write
     with:
+      export-results: false
       fail-on-vuln: true
       upload-sarif: true
       results-file-name: osv-scanner-pr-results-${{ github.workflow_sha }}-${{ github.run_number }}.sarif
