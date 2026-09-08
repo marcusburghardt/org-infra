@@ -55,8 +55,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install PyYAML
-        run: pip install --quiet PyYAML==6.0.3
+      - name: Install dependencies
+        run: pip install --require-hashes -r requirements-compliance-sync.txt
 
       - name: Run sync-compliance-targets
         id: sync
