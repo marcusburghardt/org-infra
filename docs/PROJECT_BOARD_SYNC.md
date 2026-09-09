@@ -39,6 +39,13 @@ delayed under GitHub load:
    issues than one GraphQL page. PRs with no linked issue, or whose issues
    have no Priority, stay unset — there is no default. Values already set on
    the PR are left alone.
+7. Moves items in **Ready for Review** to **In Review** when a non-author
+   human comments on the issue/PR, or submits a PR review, at or after the
+   Status last changed. The since-boundary is the Status field's `updatedAt`
+   (when this item's Status option last changed, not other board metadata).
+   Author comments, bots (`[bot]`, `authorAssociation: BOT`), and
+   unsubmitted (`PENDING`) reviews are ignored. Detected on the same
+   5-minute tick as the rest of the sync.
 
 The workflow lives only in `org-infra` (it is **not** synced out to consumer repos).
 A new PR is picked up on the next 5-minute tick (GitHub does not let this
@@ -120,3 +127,5 @@ Edit `project-sync-config.yml`:
 - Adjust `exclude_repos`
 - Toggle `sync.issues` / `sync.pull_requests`
 - Change `project.default_status` (must match a Status option on the board)
+- Change `project.ready_for_review_status` / `project.in_review_status`
+  (prefixes of the Status options used for the review-activity transition)

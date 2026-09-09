@@ -7,7 +7,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -203,6 +203,7 @@ class TestFormatAndWriteSummary:
         assert "Organization set/updated" in text
         assert "Priority copied from linked issues" in text
         assert "Priority option unmapped" in text
+        assert "Ready for Review advanced to In Review" in text
 
     def test_write_summary_appends_step_summary(self, tmp_path: Path, monkeypatch):
         summary_path = tmp_path / "summary.md"
@@ -229,6 +230,7 @@ class TestSyncErrorHandling:
         monkeypatch.setattr(
             sync, "ensure_pr_priority_from_issues", lambda *_a, **_k: None
         )
+        monkeypatch.setattr(sync, "advance_ready_for_review", lambda *_a, **_k: None)
 
     def test_per_org_request_errors_are_recorded(self, monkeypatch: pytest.MonkeyPatch):
         self._project_mocks(monkeypatch)
@@ -585,6 +587,7 @@ class TestSyncOrganizationStats:
         monkeypatch.setattr(
             sync, "ensure_pr_priority_from_issues", lambda *_a, **_k: None
         )
+        monkeypatch.setattr(sync, "advance_ready_for_review", lambda *_a, **_k: None)
         monkeypatch.setattr(
             sync,
             "list_org_repos",
@@ -1172,5 +1175,523 @@ class TestPriorityInherit:
         assert stats.priority_set == 2
         captured = capsys.readouterr()
         assert "[dry-run] would set field" in captured.out
+
+
+READY_STATUS = "Ready for Review  👀"
+IN_REVIEW_STATUS = "In Review 🏁"
+STATUS_SINCE = "2026-08-25T10:00:00Z"
+ACTIVITY_BEFORE = "2026-08-25T09:00:00Z"
+ACTIVITY_AFTER = "2026-08-25T11:00:00Z"
+
+
+def _review_fields() -> sync.ProjectFields:
+    return _org_fields(
+        status_options={
+            "Backlog": "ST_BACKLOG",
+            READY_STATUS: "ST_READY",
+            IN_REVIEW_STATUS: "ST_IN_REVIEW",
+        }
+    )
+
+
+def _comment(
+    login: str,
+    created_at: str,
+    association: str = "MEMBER",
+) -> Dict[str, Any]:
+    return {
+        "createdAt": created_at,
+        "author": {"login": login},
+        "authorAssociation": association,
+    }
+
+
+def _review(
+    login: str,
+    submitted_at: Optional[str],
+    state: str,
+    association: str = "MEMBER",
+) -> Dict[str, Any]:
+    return {
+        "submittedAt": submitted_at,
+        "state": state,
+        "author": {"login": login},
+        "authorAssociation": association,
+    }
+
+
+def _ready_board_item(
+    *,
+    item_id: str = "PVTI_1",
+    content_id: str = "I_1",
+    typename: str = "Issue",
+    status_name: str = READY_STATUS,
+    updated_at: str = STATUS_SINCE,
+    author: str = "alice",
+    repo: str = "complytime/demo",
+    number: int = 7,
+) -> Dict[str, Any]:
+    return {
+        "id": item_id,
+        "status": {"name": status_name, "updatedAt": updated_at},
+        "content": {
+            "__typename": typename,
+            "id": content_id,
+            "number": number,
+            "title": "work",
+            "author": {"login": author},
+            "repository": {"nameWithOwner": repo},
+        },
+    }
+
+
+class TestReviewStatusPrefixes:
+    def test_defaults_when_keys_omitted(self):
+        assert sync.review_status_prefixes(_minimal_config()) == (
+            sync.DEFAULT_READY_FOR_REVIEW_STATUS,
+            sync.DEFAULT_IN_REVIEW_STATUS,
+        )
+
+    def test_reads_configured_prefixes(self):
+        config = _minimal_config()
+        config["project"]["ready_for_review_status"] = " Waiting "
+        config["project"]["in_review_status"] = " Looking "
+        assert sync.review_status_prefixes(config) == ("Waiting", "Looking")
+
+    def test_blank_values_fall_back_to_defaults(self):
+        config = _minimal_config()
+        config["project"]["ready_for_review_status"] = "   "
+        config["project"]["in_review_status"] = None
+        assert sync.review_status_prefixes(config) == (
+            sync.DEFAULT_READY_FOR_REVIEW_STATUS,
+            sync.DEFAULT_IN_REVIEW_STATUS,
+        )
+
+
+class TestStatusOptionForPrefix:
+    def test_matches_emoji_option_by_prefix(self):
+        options = {
+            "Ready 🚀": "A",
+            READY_STATUS: "B",
+            IN_REVIEW_STATUS: "C",
+        }
+        assert sync.status_option_for_prefix(options, "Ready for Review") == (
+            READY_STATUS,
+            "B",
+        )
+        assert sync.status_option_for_prefix(options, "In Review") == (
+            IN_REVIEW_STATUS,
+            "C",
+        )
+
+    def test_prefers_exact_match(self):
+        options = {"Ready": "EXACT", "Ready for Review  👀": "EMOJI"}
+        assert sync.status_option_for_prefix(options, "Ready") == ("Ready", "EXACT")
+
+    def test_ambiguous_prefix_returns_none(self):
+        options = {"Ready 🚀": "A", "Ready for Review  👀": "B"}
+        assert sync.status_option_for_prefix(options, "Ready") is None
+
+    def test_missing_prefix_returns_none(self):
+        assert sync.status_option_for_prefix({"Backlog": "X"}, "In Review") is None
+        assert sync.status_option_for_prefix({"Backlog": "X"}, "") is None
+
+
+class TestReviewerActivityDetection:
+    def _since(self):
+        parsed = sync.parse_github_datetime(STATUS_SINCE)
+        assert parsed is not None
+        return parsed
+
+    def test_parse_github_datetime_accepts_z_and_rejects_garbage(self):
+        parsed = sync.parse_github_datetime("2026-08-25T10:00:00Z")
+        assert parsed is not None
+        assert parsed.year == 2026
+        assert sync.parse_github_datetime(None) is None
+        assert sync.parse_github_datetime("not-a-date") is None
+
+    def test_issue_comment_from_other_human_after_status_counts(self):
+        content = {
+            "__typename": "Issue",
+            "author": {"login": "alice"},
+            "comments": {
+                "nodes": [_comment("bob", ACTIVITY_AFTER)],
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is True
+
+    def test_author_comment_does_not_count(self):
+        content = {
+            "__typename": "Issue",
+            "author": {"login": "alice"},
+            "comments": {
+                "nodes": [_comment("alice", ACTIVITY_AFTER)],
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is False
+
+    def test_bot_comment_does_not_count(self):
+        content = {
+            "__typename": "Issue",
+            "author": {"login": "alice"},
+            "comments": {
+                "nodes": [
+                    _comment("github-actions[bot]", ACTIVITY_AFTER, "BOT"),
+                    _comment("renovate[bot]", ACTIVITY_AFTER),
+                ]
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is False
+
+    def test_comment_before_status_change_does_not_count(self):
+        content = {
+            "__typename": "Issue",
+            "author": {"login": "alice"},
+            "comments": {
+                "nodes": [_comment("bob", ACTIVITY_BEFORE)],
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is False
+
+    def test_pr_submitted_review_counts(self):
+        content = {
+            "__typename": "PullRequest",
+            "author": {"login": "alice"},
+            "comments": {"nodes": []},
+            "reviews": {
+                "nodes": [_review("bob", ACTIVITY_AFTER, "CHANGES_REQUESTED")],
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is True
+
+    def test_pending_review_does_not_count(self):
+        content = {
+            "__typename": "PullRequest",
+            "author": {"login": "alice"},
+            "comments": {"nodes": []},
+            "reviews": {
+                "nodes": [_review("bob", None, "PENDING")],
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is False
+
+    def test_author_review_does_not_count(self):
+        content = {
+            "__typename": "PullRequest",
+            "author": {"login": "alice"},
+            "comments": {"nodes": []},
+            "reviews": {
+                "nodes": [_review("alice", ACTIVITY_AFTER, "COMMENTED")],
+            },
+        }
+        assert sync.content_has_reviewer_activity(content, self._since()) is False
+
+
+def _issue_activity(*comments: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "__typename": "Issue",
+        "author": {"login": "alice"},
+        "comments": {"nodes": list(comments)},
+    }
+
+
+class TestAdvanceReadyForReview:
+    def test_moves_issue_after_reviewer_comment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [_ready_board_item()],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            lambda *_a, **_k: {
+                "I_1": _issue_activity(_comment("bob", ACTIVITY_AFTER)),
+            },
+        )
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_mock.assert_called_once_with(
+            client, "PROJECT", "PVTI_1", "STATUS_FIELD", "ST_IN_REVIEW"
+        )
+        assert stats.review_status_set == 1
+        assert stats.review_status_failed == 0
+
+    def test_dry_run_calls_set_single_select_and_counts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=True)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [_ready_board_item()],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            lambda *_a, **_k: {
+                "I_1": _issue_activity(_comment("bob", ACTIVITY_AFTER)),
+            },
+        )
+        real_set = sync.set_single_select
+        set_spy = MagicMock(side_effect=real_set)
+        monkeypatch.setattr(sync, "set_single_select", set_spy)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_spy.assert_called_once_with(
+            client, "PROJECT", "PVTI_1", "STATUS_FIELD", "ST_IN_REVIEW"
+        )
+        assert stats.review_status_set == 1
+        client.graphql.assert_not_called()
+
+    def test_moves_pr_after_submitted_review(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [
+                _ready_board_item(
+                    item_id="PVTI_PR",
+                    content_id="PR_1",
+                    typename="PullRequest",
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            lambda *_a, **_k: {
+                "PR_1": {
+                    "__typename": "PullRequest",
+                    "author": {"login": "alice"},
+                    "comments": {"nodes": []},
+                    "reviews": {
+                        "nodes": [_review("bob", ACTIVITY_AFTER, "APPROVED")],
+                    },
+                }
+            },
+        )
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_mock.assert_called_once()
+        assert stats.review_status_set == 1
+
+    def test_leaves_item_when_only_author_commented(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [_ready_board_item()],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            lambda *_a, **_k: {
+                "I_1": _issue_activity(_comment("alice", ACTIVITY_AFTER)),
+            },
+        )
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_mock.assert_not_called()
+        assert stats.review_status_set == 0
+
+    def test_skips_other_statuses(self, monkeypatch: pytest.MonkeyPatch):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [
+                _ready_board_item(status_name="In progress 📋"),
+                _ready_board_item(
+                    item_id="PVTI_2",
+                    status_name=IN_REVIEW_STATUS,
+                ),
+            ],
+        )
+        fetch_mock = MagicMock()
+        monkeypatch.setattr(sync, "fetch_contents_review_activity", fetch_mock)
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        fetch_mock.assert_not_called()
+        set_mock.assert_not_called()
+
+    def test_skips_when_status_options_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        list_mock = MagicMock()
+        monkeypatch.setattr(sync, "list_board_status_items", list_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _org_fields(), stats)
+        list_mock.assert_not_called()
+        assert stats.review_status_set == 0
+
+    def test_records_field_write_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [_ready_board_item()],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            lambda *_a, **_k: {
+                "I_1": _issue_activity(_comment("bob", ACTIVITY_AFTER)),
+            },
+        )
+        monkeypatch.setattr(
+            sync,
+            "set_single_select",
+            MagicMock(side_effect=RuntimeError("INSUFFICIENT_SCOPES")),
+        )
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        assert stats.review_status_set == 0
+        assert stats.review_status_failed == 1
+        assert any("Failed advancing" in err for err in stats.errors)
+
+    def test_records_batch_fetch_failure(self, monkeypatch: pytest.MonkeyPatch):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [
+                _ready_board_item(item_id="PVTI_1", content_id="I_1"),
+                _ready_board_item(item_id="PVTI_2", content_id="I_2", number=2),
+            ],
+        )
+        monkeypatch.setattr(
+            sync,
+            "fetch_contents_review_activity",
+            MagicMock(side_effect=RuntimeError("GraphQL errors")),
+        )
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        set_mock.assert_not_called()
+        assert stats.review_status_set == 0
+        assert stats.review_status_failed == 2
+        assert len(stats.errors) == 2
+
+    def test_fetches_ready_items_in_one_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        client = MagicMock(dry_run=False)
+        monkeypatch.setattr(
+            sync,
+            "list_board_status_items",
+            lambda *_a, **_k: [
+                _ready_board_item(item_id="PVTI_1", content_id="I_1", number=1),
+                _ready_board_item(item_id="PVTI_2", content_id="I_2", number=2),
+            ],
+        )
+        client.graphql.return_value = {
+            "nodes": [
+                {
+                    "id": "I_1",
+                    **_issue_activity(_comment("bob", ACTIVITY_AFTER)),
+                },
+                {
+                    "id": "I_2",
+                    **_issue_activity(),
+                },
+            ]
+        }
+        set_mock = MagicMock()
+        monkeypatch.setattr(sync, "set_single_select", set_mock)
+        stats = sync.SyncStats()
+        sync.advance_ready_for_review(client, _review_fields(), stats)
+        client.graphql.assert_called_once()
+        query, variables = client.graphql.call_args.args
+        assert "$pageSize: Int!" in query
+        assert "last: $pageSize" in query
+        assert "reviews(last: $pageSize)" in query
+        assert variables == {
+            "ids": ["I_1", "I_2"],
+            "pageSize": sync.REVIEW_ACTIVITY_PAGE_SIZE,
+        }
+        set_mock.assert_called_once_with(
+            client, "PROJECT", "PVTI_1", "STATUS_FIELD", "ST_IN_REVIEW"
+        )
+        assert stats.review_status_set == 1
+
+    def test_fetch_query_passes_page_size_as_variable(self):
+        client = MagicMock()
+        client.graphql.return_value = {"nodes": [{"id": "I_1"}]}
+        result = sync.fetch_contents_review_activity(client, ["I_1"])
+        query, variables = client.graphql.call_args.args
+        assert "$ids: [ID!]!" in query
+        assert "$pageSize: Int!" in query
+        assert "last: $pageSize" in query
+        assert "reviews(last: $pageSize)" in query
+        assert variables["ids"] == ["I_1"]
+        assert variables["pageSize"] == sync.REVIEW_ACTIVITY_PAGE_SIZE
+        assert result == {"I_1": {"id": "I_1"}}
+
+    def test_fetch_skips_graphql_when_ids_empty(self):
+        client = MagicMock()
+        assert sync.fetch_contents_review_activity(client, []) == {}
+        client.graphql.assert_not_called()
+
+    def test_fetch_splits_into_configured_batches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(sync, "REVIEW_ACTIVITY_BATCH_SIZE", 2)
+        client = MagicMock()
+        client.graphql.side_effect = [
+            {"nodes": [{"id": "I_1"}, {"id": "I_2"}]},
+            {"nodes": [None, {"id": "I_3"}]},
+        ]
+        result = sync.fetch_contents_review_activity(
+            client, ["I_1", "I_2", "I_3"]
+        )
+        assert client.graphql.call_count == 2
+        assert client.graphql.call_args_list[0].args[1]["ids"] == ["I_1", "I_2"]
+        assert client.graphql.call_args_list[1].args[1]["ids"] == ["I_3"]
+        assert set(result) == {"I_1", "I_2", "I_3"}
+
+    def test_sync_passes_configured_status_prefixes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(sync, "get_project", lambda *_a, **_k: _org_fields())
+        monkeypatch.setattr(sync, "existing_content_ids", lambda *_a, **_k: set())
+        monkeypatch.setattr(sync, "ensure_organizations", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            sync, "ensure_pr_priority_from_issues", lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(
+            sync, "list_org_repos", MagicMock(return_value=[])
+        )
+        captured: Dict[str, str] = {}
+
+        def fake_advance(_client, _fields, _stats, **kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(sync, "advance_ready_for_review", fake_advance)
+        config = _minimal_config()
+        config["project"]["ready_for_review_status"] = "Ready for Review"
+        config["project"]["in_review_status"] = "In Review"
+        sync.sync(config, MagicMock(), org_filter={"complytime"})
+        assert captured["ready_prefix"] == "Ready for Review"
+        assert captured["in_review_prefix"] == "In Review"
 
 

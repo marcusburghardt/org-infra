@@ -7,9 +7,10 @@ Discovers repositories across one or more organizations, optionally links
 them to the target project, and adds any open issues/PRs that are not
 already on the board. Newly added items (and any existing items missing a
 value) get Organization set from the source GitHub org. PRs inherit Priority
-from linked issues when that field is empty. Designed for cross-org boards
-where a single GitHub App installation token is insufficient (use a PAT with
-multi-org access).
+from linked issues when that field is empty. Items in Ready for Review move
+to In Review when a non-author human comments or submits a PR review.
+Designed for cross-org boards where a single GitHub App installation token
+is insufficient (use a PAT with multi-org access).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -46,6 +48,22 @@ SYNC_EXCEPTIONS = (requests.RequestException, RuntimeError)
 # Project Priority / Review priority option names, highest first.
 PRIORITY_RANK = {"Urgent": 4, "High": 3, "Medium": 2, "Low": 1}
 
+# Status prefixes on the planning board. Option names include emojis
+# ("Ready for Review  👀", "In Review 🏁"); matching is by prefix.
+DEFAULT_READY_FOR_REVIEW_STATUS = "Ready for Review"
+DEFAULT_IN_REVIEW_STATUS = "In Review"
+
+# How many recent comments/reviews to inspect per Ready for Review item.
+REVIEW_ACTIVITY_PAGE_SIZE = 30
+# GitHub nodes(ids:) accepts at most 100 IDs; keep batches smaller so
+# comments(last:) + reviews(last:) stay within query complexity limits.
+REVIEW_ACTIVITY_BATCH_SIZE = 50
+
+# Submitted review states. PENDING is an unsubmitted draft and is ignored.
+COUNTABLE_REVIEW_STATES = frozenset(
+    {"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"}
+)
+
 
 @dataclass
 class SyncStats:
@@ -63,6 +81,8 @@ class SyncStats:
     priority_set: int = 0
     priority_failed: int = 0
     priority_unmapped: int = 0
+    review_status_set: int = 0
+    review_status_failed: int = 0
     errors: List[str] = field(default_factory=list)
 
 
@@ -671,6 +691,348 @@ def ensure_pr_priority_from_issues(
             )
 
 
+def review_status_prefixes(config: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (ready_for_review, in_review) Status prefixes from config."""
+    project = config.get("project") or {}
+    ready = project.get("ready_for_review_status") or DEFAULT_READY_FOR_REVIEW_STATUS
+    in_review = project.get("in_review_status") or DEFAULT_IN_REVIEW_STATUS
+    if not isinstance(ready, str) or not ready.strip():
+        ready = DEFAULT_READY_FOR_REVIEW_STATUS
+    if not isinstance(in_review, str) or not in_review.strip():
+        in_review = DEFAULT_IN_REVIEW_STATUS
+    return ready.strip(), in_review.strip()
+
+
+def status_option_for_prefix(
+    status_options: Dict[str, str], prefix: str
+) -> Optional[Tuple[str, str]]:
+    """Return (option_name, option_id) whose name starts with prefix.
+
+    Prefers an exact match when several options share the prefix. Returns
+    None when none match or when two or more non-exact names match.
+    """
+    if not prefix:
+        return None
+    matches = [
+        (name, option_id)
+        for name, option_id in status_options.items()
+        if name == prefix or name.startswith(prefix)
+    ]
+    if not matches:
+        return None
+    exact = [item for item in matches if item[0] == prefix]
+    if exact:
+        return exact[0]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def parse_github_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse a GitHub GraphQL DateTime (ISO-8601, often ending in Z)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def actor_login(node: Optional[Dict[str, Any]]) -> str:
+    """Return the author login from a GraphQL node, or empty."""
+    if not node:
+        return ""
+    author = node.get("author") or {}
+    return (author.get("login") or "").strip()
+
+
+def is_bot_actor(login: str, association: Optional[str] = None) -> bool:
+    """True for GitHub bots and the ghost user."""
+    if association == "BOT":
+        return True
+    lowered = login.lower()
+    return lowered.endswith("[bot]") or lowered == "ghost"
+
+
+def is_reviewer_actor(
+    login: str,
+    author_login: str,
+    association: Optional[str] = None,
+) -> bool:
+    """True when login is a human other than the issue/PR author."""
+    if not login or is_bot_actor(login, association):
+        return False
+    if author_login and login.lower() == author_login.lower():
+        return False
+    return True
+
+
+def _activity_is_on_or_after(timestamp: Optional[str], since: datetime) -> bool:
+    parsed = parse_github_datetime(timestamp)
+    return parsed is not None and parsed >= since
+
+
+def comment_is_reviewer_activity(
+    comment: Dict[str, Any],
+    author_login: str,
+    since: datetime,
+) -> bool:
+    """True for a non-author human comment at or after the Status change."""
+    if not _activity_is_on_or_after(comment.get("createdAt"), since):
+        return False
+    return is_reviewer_actor(
+        actor_login(comment), author_login, comment.get("authorAssociation")
+    )
+
+
+def review_is_reviewer_activity(
+    review: Dict[str, Any],
+    author_login: str,
+    since: datetime,
+) -> bool:
+    """True for a submitted non-author review at or after the Status change."""
+    state = (review.get("state") or "").upper()
+    if state not in COUNTABLE_REVIEW_STATES:
+        return False
+    if not _activity_is_on_or_after(review.get("submittedAt"), since):
+        return False
+    return is_reviewer_actor(
+        actor_login(review), author_login, review.get("authorAssociation")
+    )
+
+
+def content_has_reviewer_activity(
+    content: Dict[str, Any], since: datetime
+) -> bool:
+    """True when a non-author human commented or submitted a review after since."""
+    author_login = actor_login(content)
+    for comment in (content.get("comments") or {}).get("nodes") or []:
+        if comment_is_reviewer_activity(comment, author_login, since):
+            return True
+    if content.get("__typename") == "PullRequest":
+        for review in (content.get("reviews") or {}).get("nodes") or []:
+            if review_is_reviewer_activity(review, author_login, since):
+                return True
+    return False
+
+
+def item_content_label(content: Dict[str, Any]) -> str:
+    """Short log label for a board issue or pull request."""
+    repo = (content.get("repository") or {}).get("nameWithOwner") or "?"
+    number = content.get("number")
+    kind = "PR" if content.get("__typename") == "PullRequest" else "Issue"
+    title = content.get("title") or ""
+    return f"{kind} {repo}#{number}: {title}"
+
+
+def list_board_status_items(
+    client: GitHubClient, project_id: str
+) -> List[Dict[str, Any]]:
+    """Return board items with Status name, updatedAt, and content identity."""
+    query = """
+    query($projectId: ID!, $cursor: String) {
+      node(id: $projectId) {
+        ... on ProjectV2 {
+          items(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              id
+              status: fieldValueByName(name: "Status") {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  name
+                  updatedAt
+                }
+              }
+              content {
+                __typename
+                ... on Issue {
+                  id
+                  number
+                  title
+                  author { login }
+                  repository { nameWithOwner }
+                }
+                ... on PullRequest {
+                  id
+                  number
+                  title
+                  author { login }
+                  repository { nameWithOwner }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    return _paginate_project_item_nodes(client, project_id, query)
+
+
+def _batched(values: List[str], size: int) -> List[List[str]]:
+    """Split values into consecutive chunks of at most size."""
+    if size < 1:
+        raise ValueError(f"batch size must be >= 1, got {size}")
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
+def fetch_contents_review_activity(
+    client: GitHubClient, content_ids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Return comments (and PR reviews) keyed by issue/PR node id."""
+    if not content_ids:
+        return {}
+    query = """
+    query($ids: [ID!]!, $pageSize: Int!) {
+      nodes(ids: $ids) {
+        __typename
+        ... on Issue {
+          id
+          author { login }
+          comments(last: $pageSize) {
+            nodes {
+              createdAt
+              author { login }
+              authorAssociation
+            }
+          }
+        }
+        ... on PullRequest {
+          id
+          author { login }
+          comments(last: $pageSize) {
+            nodes {
+              createdAt
+              author { login }
+              authorAssociation
+            }
+          }
+          reviews(last: $pageSize) {
+            nodes {
+              submittedAt
+              state
+              author { login }
+              authorAssociation
+            }
+          }
+        }
+      }
+    }
+    """
+    found: Dict[str, Dict[str, Any]] = {}
+    for chunk in _batched(content_ids, REVIEW_ACTIVITY_BATCH_SIZE):
+        data = client.graphql(
+            query,
+            {"ids": chunk, "pageSize": REVIEW_ACTIVITY_PAGE_SIZE},
+        )
+        for node in data.get("nodes") or []:
+            if not node:
+                continue
+            node_id = node.get("id")
+            if node_id:
+                found[node_id] = node
+    return found
+
+
+def _ready_for_review_candidates(
+    nodes: List[Dict[str, Any]], ready_name: str
+) -> List[Tuple[str, str, Dict[str, Any], datetime]]:
+    """Collect Ready for Review items with a parseable Status.updatedAt.
+
+    Status.updatedAt is when this item's Status option last changed (not
+    other project-item metadata). That is the since-boundary so comments
+    from before the move into Ready for Review do not bounce the item
+    into In Review.
+    """
+    candidates: List[Tuple[str, str, Dict[str, Any], datetime]] = []
+    for node in nodes:
+        status = node.get("status") or {}
+        if (status.get("name") or "") != ready_name:
+            continue
+        since = parse_github_datetime(status.get("updatedAt"))
+        if since is None:
+            continue
+        content = node.get("content") or {}
+        content_id = content.get("id")
+        item_id = node.get("id")
+        if not content_id or not item_id:
+            continue
+        candidates.append((content_id, item_id, content, since))
+    return candidates
+
+
+def advance_ready_for_review(
+    client: GitHubClient,
+    fields: ProjectFields,
+    stats: SyncStats,
+    *,
+    ready_prefix: str = DEFAULT_READY_FOR_REVIEW_STATUS,
+    in_review_prefix: str = DEFAULT_IN_REVIEW_STATUS,
+) -> None:
+    """Move Ready for Review items to In Review after reviewer activity.
+
+    Counts a non-author, non-bot issue comment or a submitted PR review at
+    or after the Status field last changed. Author comments do not count, so
+    an author moving their own item into Ready for Review does not bounce it
+    into In Review.
+    """
+    if not fields.status_field_id or not fields.status_options:
+        print("Status field missing on project; skipping review-status advance")
+        return
+    ready = status_option_for_prefix(fields.status_options, ready_prefix)
+    in_review = status_option_for_prefix(fields.status_options, in_review_prefix)
+    if not ready or not in_review:
+        print(
+            "Warning: Ready for Review / In Review Status options not found; "
+            "skipping review-status advance"
+        )
+        return
+    ready_name, _ready_id = ready
+    in_review_name, in_review_id = in_review
+
+    print(
+        f"\n=== Advancing {ready_name} -> {in_review_name} "
+        "on reviewer activity ==="
+    )
+    candidates = _ready_for_review_candidates(
+        list_board_status_items(client, fields.project_id), ready_name
+    )
+    if not candidates:
+        return
+    try:
+        content_ids = [content_id for content_id, _, _, _ in candidates]
+        activities = fetch_contents_review_activity(client, content_ids)
+    except SYNC_EXCEPTIONS as exc:
+        for _content_id, _item_id, content, _since in candidates:
+            stats.review_status_failed += 1
+            label = item_content_label(content)
+            msg = f"Failed advancing {label} to {in_review_name}: {exc}"
+            print(f"  ! {msg}")
+            stats.errors.append(msg)
+        return
+
+    for content_id, item_id, content, since in candidates:
+        label = item_content_label(content)
+        try:
+            activity = activities.get(content_id) or {}
+            if not content_has_reviewer_activity(activity, since):
+                continue
+            set_single_select(
+                client,
+                fields.project_id,
+                item_id,
+                fields.status_field_id,
+                in_review_id,
+            )
+            stats.review_status_set += 1
+            print(f"  status {label} -> {in_review_name}")
+        except SYNC_EXCEPTIONS as exc:
+            stats.review_status_failed += 1
+            msg = f"Failed advancing {label} to {in_review_name}: {exc}"
+            print(f"  ! {msg}")
+            stats.errors.append(msg)
+
+
 def format_summary(stats: SyncStats, dry_run: bool) -> str:
     """Format the job summary markdown (pure; no I/O)."""
     lines = [
@@ -689,6 +1051,8 @@ def format_summary(stats: SyncStats, dry_run: bool) -> str:
         f"- Priority copied from linked issues: **{stats.priority_set}**",
         f"- Priority copy failed: **{stats.priority_failed}**",
         f"- Priority option unmapped: **{stats.priority_unmapped}**",
+        f"- Ready for Review advanced to In Review: **{stats.review_status_set}**",
+        f"- Review-status advance failed: **{stats.review_status_failed}**",
     ]
     if stats.errors:
         lines.extend(["", "### Errors", ""])
@@ -863,6 +1227,14 @@ def sync(
         )
         print(f"\nSkipping Organization backfill ({reason})")
     ensure_pr_priority_from_issues(client, fields, stats)
+    ready_prefix, in_review_prefix = review_status_prefixes(config)
+    advance_ready_for_review(
+        client,
+        fields,
+        stats,
+        ready_prefix=ready_prefix,
+        in_review_prefix=in_review_prefix,
+    )
     return stats
 
 
