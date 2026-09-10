@@ -35,13 +35,13 @@ on:
           - never
         default: auto
   schedule:
-    # Fastest GitHub Actions interval. Cron of every 1 minute is valid YAML
-    # but GitHub will not honor intervals shorter than 5 minutes.
-    # See: https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#onschedule
-    - cron: '*/5 * * * *'
+    # Every 15 minutes. Reduced from */5 to cut API consumption (~3x fewer
+    # ticks per hour) while keeping acceptable latency for a planning board.
+    # See: https://github.com/complytime/org-infra/issues/576
+    - cron: '*/15 * * * *'
 
 # A full sync can take several minutes. Keep one run in flight (and at most
-# one queued) so 5-minute ticks do not pile up.
+# one queued) so 15-minute ticks do not pile up.
 concurrency:
   group: sync-compliance-automation-project-board
   cancel-in-progress: false
