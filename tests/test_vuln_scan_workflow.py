@@ -47,15 +47,31 @@ def workflow() -> dict[str, Any]:
         return yaml.load(workflow_file, Loader=GitHubActionsLoader)
 
 
+def test_github_actions_loader_preserves_on_key() -> None:
+    """The custom loader must not coerce the ``on`` key to ``True`` (YAML 1.1 bool)."""
+    sample = "on:\n  push:\n    branches: [main]\n"
+    parsed = yaml.load(sample, Loader=GitHubActionsLoader)
+
+    assert "on" in parsed
+    assert True not in parsed
+
+
 def test_osv_call_disables_exports_and_preserves_security_enforcement(
     workflow: dict[str, Any],
 ) -> None:
     """OSV must suppress complete outputs without weakening scan enforcement."""
     osv_inputs = workflow["jobs"][OSV_JOB_NAME]["with"]
 
+    assert "export-results" in osv_inputs, (
+        "export-results must be explicitly set, not rely on the upstream default"
+    )
     assert osv_inputs["export-results"] is False
     assert osv_inputs["upload-sarif"] is True
     assert osv_inputs["fail-on-vuln"] is True
+    assert "results-file-name" in osv_inputs, (
+        "results-file-name enables artifact retention and must not be removed"
+    )
+    assert re.match(r"^osv-scanner-pr-results-.+\.sarif$", osv_inputs["results-file-name"])
 
 
 def test_osv_call_preserves_pinned_upstream_artifact_integration(
@@ -70,7 +86,12 @@ def test_osv_call_preserves_pinned_upstream_artifact_integration(
 def test_workflow_does_not_expose_complete_old_or_new_result_outputs(
     workflow: dict[str, Any],
 ) -> None:
-    """Neither the wrapper nor its OSV job may expose complete JSON reports."""
+    """Neither the wrapper nor its OSV job may expose complete JSON reports.
+
+    Intentionally strict: design.md defers summary outputs (e.g. a vulnerability
+    count boolean) until a consumer requires them. This blanket ban must be
+    relaxed only when such outputs are added under a dedicated change.
+    """
     workflow_call = workflow["on"]["workflow_call"]
     osv_job = workflow["jobs"][OSV_JOB_NAME]
 
