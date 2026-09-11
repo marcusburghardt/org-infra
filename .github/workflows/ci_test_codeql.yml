@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Validates the reusable CodeQL workflow's static contract.
+# Parses YAML structure and asserts on inputs, permissions, SHA pins,
+# step ordering, and conditionals. Does not run CodeQL analysis.
+
+name: Test CodeQL Workflow
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci_test_codeql.yml"
+      - ".github/workflows/reusable_codeql.yml"
+      - "tests/test_codeql_workflow.py"
+      - "requirements-vuln-scan.txt"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci_test_codeql.yml"
+      - ".github/workflows/reusable_codeql.yml"
+      - "tests/test_codeql_workflow.py"
+      - "requirements-vuln-scan.txt"
+
+permissions: {}
+
+jobs:
+  test-codeql-workflow:
+    name: Test CodeQL Workflow Contract
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --require-hashes -r requirements-vuln-scan.txt
+
+      - name: Run CodeQL workflow contract tests
+        run: python -m pytest tests/test_codeql_workflow.py -v

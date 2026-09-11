@@ -1,0 +1,148 @@
+# Reusable CodeQL Analysis Workflow
+# ==================================
+# Wraps GitHub CodeQL semantic static analysis with controlled Go version
+# management, configurable build modes, and advisory or blocking alerts.
+#
+# Modes:
+#   - Autobuild (default): CodeQL detects the build system automatically.
+#     Works for standard single-module Go repos.
+#   - Manual build: Caller provides a custom build-command for repos with
+#     non-standard builds (multi-module workspaces, custom toolchains).
+#   - No build: For interpreted languages (Python, JavaScript) that do not
+#     require compilation. Skipped automatically when language is not Go.
+#
+# Supported languages: go, python, javascript, java, and any language
+# supported by github/codeql-action. Go-specific steps (setup-go, build)
+# are conditional on language == 'go'.
+#
+# Security:
+#   - Workflow-level permissions: deny all
+#   - Job-level permissions: contents:read, security-events:write, actions:read
+#   - Checkout with persist-credentials: false
+#   - build-command passed via environment variable (never inline-interpolated)
+#   - All action refs SHA-pinned to 40-character commit hashes
+#
+# This workflow is NOT synced to downstream repos. Repos opt in by creating
+# their own consumer workflow calling this reusable cross-repo, following
+# the same adoption model as reusable_sonarqube.yml.
+
+name: Reusable CodeQL Analysis
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: >-
+          CodeQL language to analyze (e.g., go, python, javascript).
+          One language per invocation; use a caller-side matrix for
+          multi-language repos.
+        required: true
+        type: string
+      go-version-file:
+        description: >-
+          Path to go.mod or go.work for Go version resolution.
+          Ignored when language is not go.
+        required: false
+        type: string
+        default: "go.mod"
+      build-command:
+        description: >-
+          Custom build command for manual build mode. When empty,
+          CodeQL autobuild is used for compiled languages. For
+          interpreted languages, the build step is skipped entirely.
+        required: false
+        type: string
+        default: ""
+      query-suite:
+        description: >-
+          CodeQL query suite to run. Options: default (highest
+          precision), security-extended (broader coverage),
+          security-and-quality (includes code quality).
+        required: false
+        type: string
+        default: "default"
+      fail-on-alert:
+        description: >-
+          Fail the workflow if CodeQL finds alerts. When false
+          (default), findings appear as advisory Code Scanning
+          alerts without blocking the workflow.
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ inputs.language }}-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        if: inputs.language == 'go'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ inputs.language }}
+          queries: ${{ inputs.query-suite }}
+          build-mode: ${{ inputs.build-command != '' && 'manual' || '' }}
+
+      - name: Autobuild
+        if: inputs.build-command == '' && inputs.language == 'go'
+        uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+
+      - name: Custom Build
+        if: inputs.build-command != ''
+        shell: bash
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: |
+          set -euo pipefail
+          # Trust boundary: build-command comes from the caller's workflow YAML,
+          # which requires repo write access to modify. The env var indirection
+          # prevents expression injection; eval is intentional for shell syntax.
+          eval "${BUILD_COMMAND}"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:${{ inputs.language }}"
+
+      - name: Fail on Alerts
+        if: inputs.fail-on-alert
+        shell: bash
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          set -euo pipefail
+          sarif_dir="../results"
+          sarif_file=$(find "${sarif_dir}" -name "*.sarif" -type f 2>/dev/null | head -1)
+          if [[ -z "${sarif_file}" ]]; then
+            echo "::warning::No SARIF file found — skipping alert check"
+            exit 0
+          fi
+          alert_count=$(jq '[.runs[] | (.results // [])[] | select(.level == "error" or .level == "warning")] | length' "${sarif_file}")
+          if [[ "${alert_count}" -gt 0 ]]; then
+            echo "::error::CodeQL found ${alert_count} alert(s) for ${LANGUAGE}. See the Security tab for details."
+            exit 1
+          fi
+          echo "No blocking alerts found for ${LANGUAGE}."
