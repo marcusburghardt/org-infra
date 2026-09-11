@@ -44,7 +44,6 @@ files_to_sync:
         default: "false"
         repos:
           complyctl: "true"
-          complytime: "true"
           complytime-providers: "true"
           complytime-collector-components: "true"
       trivy_ignorefile:
@@ -96,6 +95,7 @@ files_to_sync:
     destination: .github/workflows/ci_crapload.yml
     exclude_repos:
       - .github
+      - complytime
       - complytime-demos
       - complytime-policies
       - community
@@ -150,6 +150,7 @@ files_to_sync:
   - source: .golangci.yml
     destination: .golangci.yml
     exclude_repos:
+      - complytime
       - complytime-demos
       - complytime-policies
       - community
@@ -288,28 +289,8 @@ dependabot:
           prefix: "chore"
           include: "scope"
 
-    complytime:
-      - package-ecosystem: "gomod"
-        directory: "/"
-        schedule:
-          interval: "weekly"
-        open-pull-requests-limit: 10
-        commit-message:
-          prefix: "chore"
-          include: "scope"
-
     complytime-providers:
       - package-ecosystem: "gomod"
-        directory: "/"
-        schedule:
-          interval: "weekly"
-        open-pull-requests-limit: 10
-        commit-message:
-          prefix: "chore"
-          include: "scope"
-
-    complytime-demos:
-      - package-ecosystem: "pip"
         directory: "/"
         schedule:
           interval: "weekly"
