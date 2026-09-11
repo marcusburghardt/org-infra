@@ -32,7 +32,7 @@ sync:
 # Organizations and repository selection rules
 organizations:
   - name: Agentic-SSDLC
-    # All repositories
+  # All repositories
 
   - name: complytime
     exclude_repos:
@@ -40,4 +40,4 @@ organizations:
       - complytime
 
   - name: unbound-force
-    # All repositories
+  # All repositories

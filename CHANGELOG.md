@@ -57,6 +57,12 @@
   when the consumer repo has no config file, preserving backward
   compatibility. PR comment generation is inline via jq. (#328)
 
+### Fixed
+
+- **Vulnerability scan**: Prevent OSV scan failures when JSON results exceed
+  GitHub's 1 MiB job-output limit by explicitly disabling result exports.
+  Complete reports remain available as workflow artifacts. (#574)
+
 ### Removed
 
 - `scripts/compare-crapload.sh` — comparison logic is now native to gaze
