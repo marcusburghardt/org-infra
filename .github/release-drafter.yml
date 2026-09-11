@@ -35,45 +35,75 @@ sort-by: merged_at
 sort-direction: ascending
 
 categories:
-  - title: "Breaking changes"
-    labels:
-      - "breaking"
-      - "major"
-  - title: "Workflows & GitHub Actions"
-    labels:
-      - "workflows"
-    collapse-after: 12
-  - title: "Compliance & policy assets"
-    labels:
-      - "compliance"
-    collapse-after: 8
-  - title: "Sync & repository configuration"
-    labels:
-      - "sync-config"
-    collapse-after: 8
-  - title: "Features"
-    labels:
-      - "feature"
-      - "enhancement"
-  - title: "Bug fixes"
-    labels:
-      - "fix"
-      - "bugfix"
-      - "bug"
-  - title: "Performance"
-    labels:
-      - "performance"
-  - title: "Maintenance"
-    labels:
-      - "infrastructure"
-      - "automation"
-      - "documentation"
-      - "dependencies"
-      - "maintenance"
-      - "revert"
+  # --- pre-filters ---
+  - type: "pre-exclude"
+    when:
+      label: "skip-changelog"
 
-exclude-labels:
-  - "skip-changelog"
+  # --- intent-based categories (checked first so a feat: or fix: PR
+  #     is classified by intent even when it also touches workflow files) ---
+  - title: "Breaking changes"
+    semver-increment: "major"
+    when:
+      labels:
+        - "breaking"
+        - "major"
+  - title: "Features"
+    semver-increment: "minor"
+    when:
+      labels:
+        - "feature"
+        - "enhancement"
+  - title: "Bug fixes"
+    semver-increment: "patch"
+    when:
+      labels:
+        - "fix"
+        - "bugfix"
+        - "bug"
+  - title: "Performance"
+    semver-increment: "patch"
+    when:
+      label: "performance"
+
+  # --- area-based categories (catch remaining PRs that have no intent label) ---
+  - title: "Workflows & GitHub Actions"
+    semver-increment: "patch"
+    collapse-after: 12
+    when:
+      label: "workflows"
+  - title: "Compliance & policy assets"
+    semver-increment: "patch"
+    collapse-after: 8
+    when:
+      label: "compliance"
+  - title: "Sync & repository configuration"
+    semver-increment: "patch"
+    collapse-after: 8
+    when:
+      label: "sync-config"
+
+  # --- catch-all maintenance bucket ---
+  - title: "Maintenance"
+    semver-increment: "patch"
+    when:
+      labels:
+        - "infrastructure"
+        - "automation"
+        - "documentation"
+        - "dependencies"
+        - "maintenance"
+        - "revert"
+
+  # --- version-only labels (no changelog section) ---
+  - type: "version-resolver"
+    semver-increment: "minor"
+    when:
+      label: "minor"
+  - type: "version-resolver"
+    semver-increment: "patch"
+    when:
+      label: "patch"
 
 exclude-contributors:
   - "github-actions[bot]"
@@ -81,25 +111,6 @@ exclude-contributors:
   - "complytime-renovate[bot]"
 
 version-resolver:
-  major:
-    labels:
-      - "breaking"
-      - "major"
-  minor:
-    labels:
-      - "feature"
-      - "enhancement"
-      - "minor"
-  patch:
-    labels:
-      - "fix"
-      - "documentation"
-      - "maintenance"
-      - "patch"
-      - "performance"
-      - "workflows"
-      - "compliance"
-      - "sync-config"
   default: patch
 
 autolabeler:
